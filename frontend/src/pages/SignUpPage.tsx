@@ -14,6 +14,7 @@ export function SignUpPage() {
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setStatus('Workspace details captured. Ready to authenticate.')
+    window.setTimeout(() => navigate('/dashboard'), 250)
   }
 
   return (

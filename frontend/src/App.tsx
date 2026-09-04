@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { IntroScreen } from './components/IntroScreen'
 import { SignUpPage } from './pages/SignUpPage'
 import { SignInPage } from './pages/SignInPage'
+import { DashboardPage } from './pages/DashboardPage'
 import './App.css'
 
 const INTRO_DURATION_MS = 4000
@@ -24,6 +25,7 @@ export function App() {
       <Routes>
         <Route path="/sign-up" element={<SignUpPage />} />
         <Route path="/sign-in" element={<SignInPage />} />
+        <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/" element={<Navigate to="/sign-up" replace />} />
         <Route path="*" element={<Navigate to="/sign-up" replace />} />
       </Routes>

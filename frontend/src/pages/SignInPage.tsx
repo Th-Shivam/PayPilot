@@ -13,6 +13,7 @@ export function SignInPage() {
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setStatus('Welcome back. Workspace ready.')
+    window.setTimeout(() => navigate('/dashboard'), 250)
   }
 
   return (

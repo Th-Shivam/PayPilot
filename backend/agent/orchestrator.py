@@ -100,7 +100,7 @@ class GroqOrchestrator:
 
     def run(self, txn_id: str, diagnosis: dict[str, Any]) -> AgentRunResult:
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": load_system_prompt()},
+            {"role": "system", "content": load_system_prompt() + '\n\nFinal answer must be a JSON object with exactly these keys: {"explanation": string (2-4 sentences), "status": string, "action": string}. Set "status" to the diagnosis match_status and "action" to the diagnosis action, verbatim.'},
             {"role": "user", "content": json.dumps({"txn_id": txn_id, "diagnosis": diagnosis}, default=str)},
         ]
         trace: list[TraceEvent] = []
@@ -131,7 +131,7 @@ class GroqOrchestrator:
                     messages.append({"role": "tool", "tool_call_id": call.id, "name": name, "content": json.dumps(result, default=str)})
                 continue
             try:
-                parsed = json.loads(message.content or "{}")
+                parsed = self._extract_json(message.content)
                 final = AgentFinalResponse.model_validate(parsed)
             except Exception as exc:
                 raise GroqOrchestrationError("Groq returned an invalid final response") from exc
@@ -148,12 +148,15 @@ class GroqOrchestrator:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
+                # No response_format=json_object here: several Groq models reject
+                # JSON mode combined with tools ("json mode cannot be combined
+                # with tool/function calling"). The system prompt requests JSON
+                # for the final answer, and _extract_json parses it tolerantly.
                 return self.client.chat.completions.create(
                     model=model,
                     messages=messages,
                     tools=tool_schemas(),
                     tool_choice="auto",
-                    response_format={"type": "json_object"},
                     timeout=self.timeout_seconds,
                 )
             except Exception as exc:
@@ -161,6 +164,19 @@ class GroqOrchestrator:
                 if attempt < self.max_retries:
                     time.sleep(min(0.25 * (2**attempt), 1.0))
         raise last_error or GroqOrchestrationError("Groq completion failed")
+
+    @staticmethod
+    def _extract_json(content: str | None) -> dict[str, Any]:
+        """Parse a final answer that may be wrapped in prose or ``` fences."""
+        text = (content or "").strip()
+        if text.startswith("```"):
+            text = text.split("```", 2)[1] if text.count("```") >= 2 else text.strip("`")
+            if text.lstrip().lower().startswith("json"):
+                text = text.lstrip()[4:]
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            text = text[start : end + 1]
+        return json.loads(text)
 
     @staticmethod
     def _tool_call_dict(call: Any) -> dict[str, Any]:

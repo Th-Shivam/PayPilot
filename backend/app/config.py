@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://localhost:5173"
 
     groq_api_key: SecretStr | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
-    groq_fallback_model: str = "llama-3.1-8b-instant"
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_fallback_model: str = "openai/gpt-oss-20b"
     groq_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     agent_max_steps: int = Field(default=8, ge=1, le=8)
     embedding_model: str = "all-MiniLM-L6-v2"

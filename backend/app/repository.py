@@ -182,7 +182,10 @@ class SupabaseRepository:
         query_table = aliases.get(table, table) if isinstance(available, dict) and table not in available else table
         response = self.client.table(query_table).select("*").eq("txn_id", txn_id).limit(1).execute()
         row = (response.data or [None])[0]
-        if row is None:
+        if row is None and isinstance(available, dict):
+            # Legacy fixture clients keyed rows on transaction_id. The live
+            # schema has no such column, so only try this fallback against the
+            # in-memory test client, never against Postgres (where it 500s).
             response = self.client.table(query_table).select("*").eq("transaction_id", txn_id).limit(1).execute()
             row = (response.data or [None])[0]
         return row

@@ -21,5 +21,5 @@ def test_similarity_rpc_is_bounded_and_uses_pgvector_cosine_distance():
     assert "create or replace function match_tickets" in migration
     assert "query_embedding vector(384)" in migration
     assert "1 - (t.embedding <=> query_embedding)" in migration
-    assert "limit least(greatest(match_count, 1), 20)" in migration
+    assert "limit least(greatest(coalesce(match_count, 1), 1), 20)" in migration
     assert "using hnsw (embedding vector_cosine_ops)" in migration

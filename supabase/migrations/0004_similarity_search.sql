@@ -46,7 +46,7 @@ as $$
       and (exclude_txn_id is null or t.txn_id <> exclude_txn_id)
       and 1 - (t.embedding <=> query_embedding) >= match_threshold
     order by t.embedding <=> query_embedding
-    limit least(greatest(match_count, 1), 20);
+    limit least(greatest(coalesce(match_count, 1), 1), 20);
 $$;
 
 comment on function match_tickets is

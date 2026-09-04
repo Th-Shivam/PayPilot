@@ -44,17 +44,52 @@
         },
         "responses": {
           "200": {
-            "description": "Successful Response",
+            "description": "JSON resolution by default; request with Accept: text/event-stream for progressive trace events.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ResolveResponse"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
           },
           "404": {
             "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -101,6 +136,26 @@
                 }
               }
             }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
           },
           "404": {
             "content": {
@@ -178,6 +233,26 @@
               }
             }
           },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -209,6 +284,26 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -224,6 +319,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AnalyticsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -252,6 +367,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ReconcileResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Forbidden",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -545,6 +680,95 @@
         ],
         "title": "TicketResponse"
       },
+      "TraceEvent": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Event Id"
+          },
+          "transaction_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Transaction Id"
+          },
+          "run_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Run Id"
+          },
+          "request_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Request Id"
+          },
+          "step_number": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Step Number"
+          },
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "tool_start",
+              "tool_result",
+              "decision",
+              "action",
+              "retry",
+              "completion"
+            ],
+            "title": "Event Type"
+          },
+          "step_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Step Name"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "success",
+              "warning",
+              "not_found",
+              "failed",
+              "completed"
+            ],
+            "title": "Status"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Summary"
+          },
+          "detail": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Detail"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Timestamp"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "event_id",
+          "transaction_id",
+          "run_id",
+          "request_id",
+          "step_number",
+          "event_type",
+          "step_name",
+          "status",
+          "summary",
+          "timestamp"
+        ],
+        "title": "TraceEvent",
+        "description": "One ordered, replayable event from a resolution run."
+      },
       "TraceMetadata": {
         "properties": {
           "request_id": {
@@ -562,7 +786,7 @@
           },
           "steps": {
             "items": {
-              "$ref": "#/components/schemas/TraceStep"
+              "$ref": "#/components/schemas/TraceEvent"
             },
             "type": "array",
             "title": "Steps"
@@ -575,45 +799,6 @@
           "created_at"
         ],
         "title": "TraceMetadata"
-      },
-      "TraceStep": {
-        "properties": {
-          "step_number": {
-            "type": "integer",
-            "title": "Step Number"
-          },
-          "step_name": {
-            "type": "string",
-            "title": "Step Name"
-          },
-          "step_status": {
-            "type": "string",
-            "title": "Step Status"
-          },
-          "step_result": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Step Result"
-          },
-          "detail": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Detail"
-          }
-        },
-        "type": "object",
-        "required": [
-          "step_number",
-          "step_name",
-          "step_status"
-        ],
-        "title": "TraceStep"
       },
       "ValidationError": {
         "properties": {

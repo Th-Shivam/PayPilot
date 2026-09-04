@@ -29,8 +29,9 @@ already-resolved examples).
 It is safe to rerun because generated records have stable IDs; database loading should use
 upsert on the `transaction_id` unique key supplied by the schema migration.
 
-Apply migrations in numeric order (`001_fixture_schema.sql`, `002_fixture_idempotency.sql`,
-then `003_ticket_similarity.sql`). After the schema is migrated, load the generated artifacts
+Apply the canonical migrations in order (`0001_extensions.sql` through
+`0005_rls_policies.sql`). After the schema is migrated,
+load the generated artifacts
 with the idempotent loader. Tickets whose embeddings fail are skipped and returned in the
 loader's `failed_ticket_embeddings` report rather than being stored without vectors:
 

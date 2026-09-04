@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://localhost:5173"
 
     groq_api_key: SecretStr | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
-    groq_fallback_model: str = "llama-3.1-8b-instant"
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_fallback_model: str = "openai/gpt-oss-20b"
     groq_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     agent_max_steps: int = Field(default=8, ge=1, le=8)
     embedding_model: str = "all-MiniLM-L6-v2"
@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     supabase_anon_key: SecretStr | None = None
     supabase_service_role_key: SecretStr | None = None
     logfire_token: SecretStr | None = None
+    # Fail closed by default. False is accepted only for explicit local
+    # development, where the API uses a fixed support-agent identity.
+    require_auth: bool = True
 
     def validate_for_runtime(self) -> None:
         """Require integrations before a production server can start.
@@ -52,6 +55,9 @@ class Settings(BaseSettings):
         validation error includes the original input mapping, which can expose
         secret constructor values in tracebacks.
         """
+
+        if not self.require_auth and self.app_env != "local":
+            raise ConfigurationError("REQUIRE_AUTH=false is only permitted with APP_ENV=local")
 
         if self.app_env != "production":
             return

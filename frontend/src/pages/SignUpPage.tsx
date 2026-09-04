@@ -2,19 +2,50 @@ import { useState, useId, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowRight, Eye, EyeOff } from 'lucide-react'
 import { AuthLayout } from '../components/auth/AuthLayout'
+import { supabase } from '../lib/supabase'
 
 export function SignUpPage() {
   const navigate = useNavigate()
   const [status, setStatus] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const nameId = useId()
   const emailId = useId()
   const passwordId = useId()
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
-    setStatus('Workspace details captured. Ready to authenticate.')
-    window.setTimeout(() => navigate('/dashboard'), 250)
+    if (busy) return
+    const fields = new FormData(event.currentTarget)
+    const fullName = String(fields.get('name') ?? '')
+    const email = String(fields.get('email') ?? '')
+    const password = String(fields.get('password') ?? '')
+
+    setError('')
+    if (!supabase) {
+      // Auth is not configured locally, so keep the credential-free preview flow.
+      setStatus('Workspace details captured. Ready to authenticate.')
+      window.setTimeout(() => navigate('/dashboard'), 250)
+      return
+    }
+
+    setBusy(true)
+    setStatus('')
+    const { data, error: signUpError } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { data: { full_name: fullName } },
+    })
+    if (signUpError) {
+      setError(signUpError.message)
+    } else if (!data.session) {
+      setStatus('Check your email to confirm the account, then sign in.')
+    } else {
+      // Confirmations are disabled, so the session listener in App takes over.
+      setStatus('Workspace ready.')
+    }
+    setBusy(false)
   }
 
   return (
@@ -100,12 +131,14 @@ export function SignUpPage() {
 
         <button
           type="submit"
-          className="inline-flex items-center justify-center gap-2 w-full h-11 mt-2 rounded-[8px] bg-blue-600 text-white font-sans text-sm font-semibold cursor-pointer hover:bg-blue-700 transition-all duration-150 active:scale-[0.99]"
+          disabled={busy}
+          className="inline-flex items-center justify-center gap-2 w-full h-11 mt-2 rounded-[8px] bg-blue-600 text-white font-sans text-sm font-semibold cursor-pointer hover:bg-blue-700 transition-all duration-150 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70 disabled:active:scale-100"
         >
-          <span>Create workspace</span>
+          <span>{busy ? 'Creating workspace...' : 'Create workspace'}</span>
           <ArrowRight size={15} aria-hidden="true" />
         </button>
 
+        {error && <p className="m-0 text-red-600 text-xs text-center font-medium" role="alert">{error}</p>}
         {status && <p className="m-0 text-blue-600 text-xs text-center font-medium" role="status">{status}</p>}
       </form>
 

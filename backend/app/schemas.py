@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Self
+from typing import Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from backend.domain.trace import TraceEvent
+
+TraceStep = TraceEvent
 
 
 class ResolveRequest(BaseModel):
@@ -22,19 +26,11 @@ class ResolveRequest(BaseModel):
         return self
 
 
-class TraceStep(BaseModel):
-    step_number: int
-    step_name: str
-    step_status: str
-    step_result: str | None = None
-    detail: dict[str, Any] = Field(default_factory=dict)
-
-
 class TraceMetadata(BaseModel):
     request_id: str
     run_id: str
     created_at: datetime
-    steps: list[TraceStep] = Field(default_factory=list)
+    steps: list[TraceEvent] = Field(default_factory=list)
 
 
 class ResolveResponse(BaseModel):

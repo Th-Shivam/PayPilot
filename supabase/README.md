@@ -5,7 +5,9 @@ Migrations for PayPilot's reconciliation schema. Issue #10.
 ## Apply
 
 Numbered files must run in order — `0004` defines a function that `0005` grants
-on, and `0005` references the `exception_list` view from `0003`.
+on, `0005` references the `exception_list` view from `0003`, `0006` adds action
+idempotency, `0007` adds the canonical trace event contract, and `0008` adds
+Supabase Auth ownership and role policies.
 
 **Option A — Supabase SQL editor** (no tooling required)
 
@@ -17,6 +19,9 @@ Paste each file in order and run:
 0003_tickets_and_traces.sql
 0004_similarity_search.sql
 0005_rls_policies.sql
+0006_action_idempotency.sql
+0007_trace_event_contract.sql
+0008_auth_rbac.sql
 ```
 
 **Option B — Supabase CLI**
@@ -28,7 +33,9 @@ supabase db push
 
 Every file is idempotent: `create table if not exists`, `create or replace
 function`, `drop policy if exists` before create, and index creation guarded by
-existence checks. Re-running the full set is safe.
+existence checks. Re-running the full set is safe. Apply `0007_trace_event_contract.sql`
+before starting the SSE resolve workflow so canonical event columns and the
+stable event identity are present.
 
 ## Tables
 
@@ -88,6 +95,33 @@ Current: `tickets` and `agent_trace_logs` readable by `anon`; the three source
 feeds have no client policy and are revoked from `anon`. Writes are service-role
 only. Phase 5 replaces the read policies with owner-scoped versions — an edit to
 an existing policy, not a change in enforcement.
+
+## Authentication and RLS (0008)
+
+Migration `0008_auth_rbac.sql` supersedes the phase-2 broad read policies.
+Browser requests must use a Supabase Auth session. `business_owner` rows are
+selected through `gateway_transactions.owner_id`; tickets and traces inherit
+that ownership through `txn_id`. `support_agent` can read support data.
+Anonymous reads and all client writes are denied. FastAPI uses the service-role
+client and continues to bypass RLS for its audited agent operations.
+
+New users receive a `business_owner` profile from the
+`paypilot_on_auth_user_created` trigger
+trigger. Provision support agents from a trusted SQL editor or admin process:
+
+```sql
+update public.profiles
+set role = 'support_agent'
+where id = '<auth.users.id>';
+```
+
+Assign imported transactions to owners explicitly:
+
+```sql
+update public.gateway_transactions
+set owner_id = '<auth.users.id>'
+where txn_id = '<transaction-id>';
+```
 
 ## Verification status
 

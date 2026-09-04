@@ -1,0 +1,12 @@
+# Minimal dependencies to run the backend test suite.
+#
+# The suite uses in-memory fakes for Supabase and Groq and never touches the
+# network, so it deliberately excludes the heavy runtime deps (supabase, groq,
+# sentence-transformers/torch) that the app imports lazily. This keeps CI fast
+# and proves the tests pass without any production credentials.
+
+fastapi>=0.115,<1
+pydantic>=2.7,<3
+pydantic-settings>=2.7,<3
+httpx>=0.27,<1
+pytest>=8.0,<9

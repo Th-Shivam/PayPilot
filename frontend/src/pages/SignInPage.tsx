@@ -2,18 +2,59 @@ import { useState, useId, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowRight, Eye, EyeOff } from 'lucide-react'
 import { AuthLayout } from '../components/auth/AuthLayout'
+import { supabase } from '../lib/supabase'
 
 export function SignInPage() {
   const navigate = useNavigate()
   const [status, setStatus] = useState('')
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const emailId = useId()
   const passwordId = useId()
 
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
-    setStatus('Welcome back. Workspace ready.')
-    window.setTimeout(() => navigate('/dashboard'), 250)
+    if (busy) return
+    const fields = new FormData(event.currentTarget)
+    const email = String(fields.get('email') ?? '')
+    const password = String(fields.get('password') ?? '')
+
+    setError('')
+    if (!supabase) {
+      // Auth is not configured locally, so keep the credential-free preview flow.
+      setStatus('Welcome back. Workspace ready.')
+      window.setTimeout(() => navigate('/dashboard'), 250)
+      return
+    }
+
+    setBusy(true)
+    setStatus('')
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password })
+    if (signInError) {
+      setError(signInError.message)
+    } else {
+      // A successful sign in flips the session listener in App, which routes
+      // straight through to the operations dashboard.
+      setStatus('Welcome back. Workspace ready.')
+    }
+    setBusy(false)
+  }
+
+  const requestPasswordReset = async (): Promise<void> => {
+    const email = (document.getElementById(emailId) as HTMLInputElement | null)?.value.trim() ?? ''
+    setError('')
+    if (!supabase) {
+      setStatus('Password reset link requested.')
+      return
+    }
+    if (!email) {
+      setError('Enter your work email first, then request a reset link.')
+      return
+    }
+    const { error: resetError } = await supabase.auth.resetPasswordForEmail(email)
+    if (resetError) setError(resetError.message)
+    else setStatus('Password reset link requested.')
   }
 
   return (
@@ -54,7 +95,7 @@ export function SignInPage() {
             <button
               type="button"
               className="p-0 border-none bg-transparent text-blue-600 font-sans text-[13px] font-medium cursor-pointer hover:underline"
-              onClick={() => setStatus('Password reset link requested.')}
+              onClick={() => { void requestPasswordReset() }}
             >
               Forgot password?
             </button>
@@ -83,12 +124,14 @@ export function SignInPage() {
 
         <button
           type="submit"
-          className="inline-flex items-center justify-center gap-2 w-full h-11 mt-2 rounded-[8px] bg-blue-600 text-white font-sans text-sm font-semibold cursor-pointer hover:bg-blue-700 transition-all duration-150 active:scale-[0.99]"
+          disabled={busy}
+          className="inline-flex items-center justify-center gap-2 w-full h-11 mt-2 rounded-[8px] bg-blue-600 text-white font-sans text-sm font-semibold cursor-pointer hover:bg-blue-700 transition-all duration-150 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70 disabled:active:scale-100"
         >
-          <span>Sign in</span>
+          <span>{busy ? 'Signing in...' : 'Sign in'}</span>
           <ArrowRight size={15} aria-hidden="true" />
         </button>
 
+        {error && <p className="m-0 text-red-600 text-xs text-center font-medium" role="alert">{error}</p>}
         {status && <p className="m-0 text-blue-600 text-xs text-center font-medium" role="status">{status}</p>}
       </form>
 

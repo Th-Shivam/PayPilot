@@ -15,15 +15,39 @@
   --sans: 'Geist Variable', system-ui, sans-serif;
   --heading: 'Geist Variable', system-ui, sans-serif;
   --mono: ui-monospace, Consolas, monospace;
+
+  /* Operations dashboard surface, applied only while the dashboard is mounted. */
+  --ops-surface: #f7faf7;
+  --ops-ink: #46574e;
+  --ops-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
 }
 
 body {
   margin: 0;
+  min-width: 320px;
+  min-height: 100svh;
   background-color: #070c12;
   color: #f7f8f5;
   font-family: var(--font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/*
+ * The intro and sign-in/sign-up screens paint their own light artwork on top of
+ * a dark page, while the operations dashboard is a light document surface.
+ * Scope the dashboard palette to the dashboard instead of forcing one global
+ * background on both.
+ */
+body:has(.shell) {
+  background-color: var(--ops-surface);
+  color: var(--ops-ink);
+  font-family: var(--ops-sans);
+  font-size: 16px;
+  line-height: 145%;
 }
 
 #root {

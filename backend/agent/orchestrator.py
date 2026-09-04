@@ -64,9 +64,9 @@ TOOL_SPECS = (
     ToolSpec("lookup_gateway", "Look up the gateway record for a transaction.", {"type": "object", "properties": {"txn_id": {"type": "string"}}, "required": ["txn_id"], "additionalProperties": False}),
     ToolSpec("lookup_bank", "Look up the bank settlement for a transaction.", {"type": "object", "properties": {"txn_id": {"type": "string"}}, "required": ["txn_id"], "additionalProperties": False}),
     ToolSpec("lookup_ledger", "Look up the ledger entry for a transaction.", {"type": "object", "properties": {"txn_id": {"type": "string"}}, "required": ["txn_id"], "additionalProperties": False}),
-    ToolSpec("create_ledger_entry", "Create an authorized ledger entry after deterministic diagnosis permits it.", {"type": "object", "properties": {"txn_id": {"type": "string"}}, "required": ["txn_id"], "additionalProperties": False}),
-    ToolSpec("raise_ticket", "Raise a review ticket for an authorized exception.", {"type": "object", "properties": {"txn_id": {"type": "string"}, "reason": {"type": "string"}}, "required": ["txn_id", "reason"], "additionalProperties": False}),
-    ToolSpec("close_as_resolved", "Close a transaction only when deterministic diagnosis authorizes closure.", {"type": "object", "properties": {"txn_id": {"type": "string"}}, "required": ["txn_id"], "additionalProperties": False}),
+    ToolSpec("create_ledger_entry", "Create an authorized ledger entry after deterministic diagnosis permits it.", {"type": "object", "properties": {"txn_id": {"type": "string"}, "evidence": {"type": "object"}}, "required": ["txn_id", "evidence"], "additionalProperties": False}),
+    ToolSpec("raise_ticket", "Raise a review ticket for an authorized exception.", {"type": "object", "properties": {"txn_id": {"type": "string"}, "reason": {"type": "string"}, "evidence": {"type": "object"}}, "required": ["txn_id", "reason", "evidence"], "additionalProperties": False}),
+    ToolSpec("close_as_resolved", "Close a transaction only when deterministic diagnosis authorizes closure.", {"type": "object", "properties": {"txn_id": {"type": "string"}, "evidence": {"type": "object"}}, "required": ["txn_id", "evidence"], "additionalProperties": False}),
     ToolSpec("search_similar_tickets", "Find bounded historical tickets similar to an explanation.", {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, "required": ["query"], "additionalProperties": False}),
 )
 

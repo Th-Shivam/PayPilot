@@ -2,6 +2,7 @@ import { useState, useId, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { ArrowRight, Eye, EyeOff } from 'lucide-react'
 import { AuthLayout } from '../components/auth/AuthLayout'
+import { AuthDivider, GoogleButton } from '../components/auth/GoogleButton'
 import { supabase } from '../lib/supabase'
 
 export function SignInPage() {
@@ -71,6 +72,8 @@ export function SignInPage() {
       </div>
 
       <form className="flex flex-col gap-4 text-left" onSubmit={handleSubmit}>
+        <GoogleButton label="Sign in with Google" onError={setError} disabled={busy} />
+        <AuthDivider />
         <div className="flex flex-col gap-1.5 text-left">
           <label htmlFor={emailId} className="text-slate-700 text-xs font-semibold tracking-tight">
             Work email

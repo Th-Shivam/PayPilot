@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 from uuid import uuid4
 
 from backend.domain.models import (
@@ -16,6 +16,21 @@ from backend.reconciliation.rules import compare_records
 from backend.agent import GroqOrchestrationError
 from backend.agent_tools import search_similar_tickets
 from backend.embeddings import EmbeddingService, EmbeddingServiceError
+from .trace_events import (
+    KIND_ACTION,
+    KIND_COMPLETION,
+    KIND_DECISION,
+    KIND_RETRY,
+    KIND_TOOL_RESULT,
+    KIND_TOOL_START,
+    PERSISTABLE_STATUSES,
+    STATUS_NOT_FOUND,
+    STATUS_OK,
+    STATUS_PENDING,
+    STATUS_WARNING,
+    as_trace_step,
+    make_event,
+)
 
 # Which record model owns which columns, and how each source's canonical
 # timestamp column maps onto the model field.
@@ -61,6 +76,39 @@ class InMemoryRepository:
             raise TransactionNotFound(txn_id)
         row = self._traces[txn_id]
         return {"request_id": row["request_id"], "run_id": row["run_id"], "created_at": row["created_at"], "steps": row["steps"]}
+
+    def iter_resolve(self, txn_id: str, request_id: str = "local-request") -> Iterator[dict[str, Any]]:
+        """Yield trace events for a stored record (local/demo path, no Supabase)."""
+        if txn_id not in self.records:
+            raise TransactionNotFound(txn_id)
+        row = dict(self.records[txn_id])
+        run_id = str(uuid4())
+        status = row.get("status", "unknown")
+        action = row.get("action", "no_action_needed")
+        explanation = row.get("explanation", "")
+        counter = 0
+        steps: list[dict[str, Any]] = []
+
+        def emit(kind: str, name: str, st: str, summary: str, detail: dict[str, Any] | None = None, persist: bool = True) -> dict[str, Any]:
+            nonlocal counter
+            counter += 1
+            event = make_event(run_id=run_id, txn_id=txn_id, step_number=counter, kind=kind, name=name, status=st, summary=summary, detail=detail or {})
+            if persist and st in PERSISTABLE_STATUSES:
+                steps.append(as_trace_step(event) | {"detail": event["detail"]})
+            return event
+
+        yield emit(KIND_TOOL_START, "lookup_gateway", STATUS_PENDING, "Checking payment gateway...", persist=False)
+        yield emit(KIND_TOOL_RESULT, "lookup_gateway", STATUS_OK, "Gateway checked")
+        yield emit(KIND_TOOL_START, "lookup_bank", STATUS_PENDING, "Checking bank settlement...", persist=False)
+        yield emit(KIND_TOOL_RESULT, "lookup_bank", STATUS_OK, "Bank checked")
+        yield emit(KIND_TOOL_START, "lookup_ledger", STATUS_PENDING, "Checking internal ledger...", persist=False)
+        yield emit(KIND_TOOL_RESULT, "lookup_ledger", STATUS_OK, "Ledger checked")
+        yield emit(KIND_DECISION, "compare_records", STATUS_OK, f"Diagnosis: {status}", {"match_status": status})
+        yield emit(KIND_ACTION, "recommended", STATUS_OK, f"Recommended action: {action}", {"action": action, "executed": False})
+
+        created_at = datetime.now(timezone.utc)
+        self._traces[txn_id] = {"request_id": request_id, "run_id": run_id, "created_at": created_at, "steps": steps}
+        yield emit(KIND_COMPLETION, "resolve", STATUS_OK, f"Resolution complete: {status}", {"status": status, "explanation": explanation, "action": action, "run_id": run_id, "created_at": created_at.isoformat(), "steps": steps}, persist=False)
 
     def tickets(self, action_taken: str | None = None, confidence: str | None = None) -> list[dict[str, Any]]:
         rows = []
@@ -121,7 +169,10 @@ class SupabaseRepository:
         query_table = aliases.get(table, table) if isinstance(available, dict) and table not in available else table
         response = self.client.table(query_table).select("*").eq("txn_id", txn_id).limit(1).execute()
         row = (response.data or [None])[0]
-        if row is None:
+        if row is None and isinstance(available, dict):
+            # Legacy fixture clients keyed rows on transaction_id. The live
+            # schema has no such column, so only try this fallback against the
+            # in-memory test client, never against Postgres.
             response = self.client.table(query_table).select("*").eq("transaction_id", txn_id).limit(1).execute()
             row = (response.data or [None])[0]
         return row
@@ -179,6 +230,89 @@ class SupabaseRepository:
                 # Deterministic diagnosis remains usable when Groq is unavailable.
                 pass
         return {"txn_id": txn_id, "status": status, "action": action, "explanation": explanation, "request_id": request_id, "run_id": run_id, "created_at": datetime.now(timezone.utc), "steps": steps}
+
+    def iter_resolve(self, txn_id: str, request_id: str = "local-request") -> Iterator[dict[str, Any]]:
+        """Yield trace events as each step completes, then a terminal completion.
+
+        Reuses the same deterministic pieces as resolve() (_one, _records,
+        compare_records, _outcome) so the streamed verdict can never diverge
+        from the non-streaming one. Each outcome event is persisted to
+        agent_trace_logs as it is emitted, so a run that dies mid-way still
+        leaves a partial trace for GET /trace/{txn_id}.
+        """
+        run_id = str(uuid4())
+        counter = 0
+        steps: list[dict[str, Any]] = []
+
+        def emit(kind: str, name: str, status: str, summary: str, detail: dict[str, Any] | None = None, persist: bool = True) -> dict[str, Any]:
+            nonlocal counter
+            counter += 1
+            event = make_event(run_id=run_id, txn_id=txn_id, step_number=counter, kind=kind, name=name, status=status, summary=summary, detail=detail or {})
+            if persist and status in PERSISTABLE_STATUSES:
+                step = as_trace_step(event)
+                try:
+                    self.client.table("agent_trace_logs").insert(step).execute()
+                except Exception:
+                    pass  # Persistence is best-effort; a DB hiccup must not kill the stream.
+                steps.append(step)
+            return event
+
+        gateway = self._one("gateway_transactions", txn_id)
+        if gateway is None:
+            # No events emitted yet, so the endpoint can still return a clean 404.
+            raise TransactionNotFound(txn_id)
+
+        yield emit(KIND_TOOL_START, "lookup_gateway", STATUS_PENDING, "Checking payment gateway...", persist=False)
+        yield emit(KIND_TOOL_RESULT, "lookup_gateway", STATUS_OK, f"Gateway found: {gateway.get('status', '?')}, amount {gateway.get('amount', '?')}", {"present": True})
+
+        yield emit(KIND_TOOL_START, "lookup_bank", STATUS_PENDING, "Checking bank settlement...", persist=False)
+        bank = self._one("bank_settlements", txn_id)
+        if bank is None:
+            yield emit(KIND_TOOL_RESULT, "lookup_bank", STATUS_NOT_FOUND, "Bank: no settlement record found", {"present": False})
+        else:
+            yield emit(KIND_TOOL_RESULT, "lookup_bank", STATUS_OK, f"Bank: {bank.get('status', '?')}", {"present": True})
+
+        yield emit(KIND_TOOL_START, "lookup_ledger", STATUS_PENDING, "Checking internal ledger...", persist=False)
+        ledger = self._one("ledger_entries", txn_id)
+        if ledger is None:
+            yield emit(KIND_TOOL_RESULT, "lookup_ledger", STATUS_NOT_FOUND, "Ledger: no entry found", {"present": False})
+        else:
+            yield emit(KIND_TOOL_RESULT, "lookup_ledger", STATUS_OK, f"Ledger: {ledger.get('status', 'recorded')}", {"present": True})
+
+        g, b, l = self._records(gateway, bank, ledger)
+        verdict = compare_records(g, b, l, self.reference_time, txn_id=txn_id)
+        status = verdict.match_status.value
+        action, explanation = self._outcome(status)
+        diagnosis = {"match_status": status, "confidence": verdict.confidence.value, "reason_code": verdict.reason_code, "action": action, "detail": verdict.detail}
+        yield emit(KIND_DECISION, "compare_records", STATUS_OK, f"Diagnosis: {status} ({verdict.reason_code})", {"match_status": status, "confidence": verdict.confidence.value, "reason_code": verdict.reason_code})
+
+        if self.orchestrator is not None:
+            try:
+                self.orchestrator.handlers = {
+                    "lookup_gateway": lambda txn_id: self._one("gateway_transactions", txn_id),
+                    "lookup_bank": lambda txn_id: self._one("bank_settlements", txn_id),
+                    "lookup_ledger": lambda txn_id: self._one("ledger_entries", txn_id),
+                    "search_similar_tickets": lambda query, limit=None: self._similar_tickets(query, limit),
+                    "create_ledger_entry": lambda txn_id, evidence=None: self.create_ledger_entry(txn_id, evidence=evidence or diagnosis),
+                    "raise_ticket": lambda txn_id, reason, evidence=None: self.raise_ticket(txn_id, reason=reason, evidence=evidence or diagnosis),
+                    "close_as_resolved": lambda txn_id, evidence=None: self.close_as_resolved(txn_id, evidence=evidence or diagnosis),
+                }
+                run = self.orchestrator.run(txn_id, diagnosis)
+                explanation = run.response.explanation
+                if run.fallback_used:
+                    yield emit(KIND_RETRY, "groq", STATUS_WARNING, "Primary model failed; used fallback model.", {"model": run.model, "next_state": "continue_on_fallback"})
+                for trace_event in run.trace:
+                    if trace_event.kind == "tool_result":
+                        yield emit(KIND_ACTION, trace_event.name, STATUS_OK, f"Action executed: {trace_event.name}", {"result": trace_event.payload, "executed": True})
+            except GroqOrchestrationError:
+                # The deterministic verdict stands; only the wording falls back.
+                yield emit(KIND_RETRY, "groq", STATUS_WARNING, "LLM explanation unavailable; using deterministic summary.", {"next_state": "fallback_to_template"})
+        else:
+            # No LLM configured: surface the deterministic recommended action.
+            yield emit(KIND_ACTION, "recommended", STATUS_OK, f"Recommended action: {action}", {"action": action, "executed": False})
+
+        created_at = datetime.now(timezone.utc)
+        yield emit(KIND_COMPLETION, "resolve", STATUS_OK, f"Resolution complete: {status}", {"status": status, "explanation": explanation, "action": action, "run_id": run_id, "created_at": created_at.isoformat(), "steps": steps}, persist=False)
 
     def create_ledger_entry(self, txn_id: str, evidence: dict[str, Any] | None = None, action_key: str | None = None) -> dict[str, Any]:
         if not evidence or evidence.get("match_status") != "ledger_gap":

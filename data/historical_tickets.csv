@@ -1,0 +1,21 @@
+ticket_id,transaction_id,status,explanation,resolution_path
+ticket-historical-txn-clean-001,txn-clean-001,resolved,Historical reconciliation case for clean: transaction txn-clean-001.,clean
+ticket-historical-txn-clean-002,txn-clean-002,resolved,Historical reconciliation case for clean: transaction txn-clean-002.,clean
+ticket-historical-txn-ledger_gap-001,txn-ledger_gap-001,resolved,Historical reconciliation case for ledger_gap: transaction txn-ledger_gap-001.,ledger_gap
+ticket-historical-txn-pending-001,txn-pending-001,resolved,Historical reconciliation case for pending: transaction txn-pending-001.,pending
+ticket-historical-txn-anomaly-001,txn-anomaly-001,resolved,Historical reconciliation case for anomaly: transaction txn-anomaly-001.,anomaly
+ticket-historical-txn-amount_mismatch-001,txn-amount_mismatch-001,resolved,Historical reconciliation case for amount_mismatch: transaction txn-amount_mismatch-001.,amount_mismatch
+ticket-historical-txn-clean-003,txn-clean-003,resolved,Historical reconciliation case for clean: transaction txn-clean-003.,clean
+ticket-historical-txn-clean-004,txn-clean-004,resolved,Historical reconciliation case for clean: transaction txn-clean-004.,clean
+ticket-historical-txn-clean-005,txn-clean-005,resolved,Historical reconciliation case for clean: transaction txn-clean-005.,clean
+ticket-historical-txn-clean-006,txn-clean-006,resolved,Historical reconciliation case for clean: transaction txn-clean-006.,clean
+ticket-historical-txn-clean-007,txn-clean-007,resolved,Historical reconciliation case for clean: transaction txn-clean-007.,clean
+ticket-historical-txn-clean-008,txn-clean-008,resolved,Historical reconciliation case for clean: transaction txn-clean-008.,clean
+ticket-historical-txn-clean-009,txn-clean-009,resolved,Historical reconciliation case for clean: transaction txn-clean-009.,clean
+ticket-historical-txn-clean-010,txn-clean-010,resolved,Historical reconciliation case for clean: transaction txn-clean-010.,clean
+ticket-historical-txn-clean-011,txn-clean-011,resolved,Historical reconciliation case for clean: transaction txn-clean-011.,clean
+ticket-historical-txn-clean-012,txn-clean-012,resolved,Historical reconciliation case for clean: transaction txn-clean-012.,clean
+ticket-historical-txn-clean-013,txn-clean-013,resolved,Historical reconciliation case for clean: transaction txn-clean-013.,clean
+ticket-historical-txn-clean-014,txn-clean-014,resolved,Historical reconciliation case for clean: transaction txn-clean-014.,clean
+ticket-historical-txn-clean-015,txn-clean-015,resolved,Historical reconciliation case for clean: transaction txn-clean-015.,clean
+ticket-historical-txn-clean-016,txn-clean-016,resolved,Historical reconciliation case for clean: transaction txn-clean-016.,clean

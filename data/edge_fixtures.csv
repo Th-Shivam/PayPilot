@@ -1,4 +1,0 @@
-transaction_id,path,note
-txn-duplicate-001,duplicate,intentional duplicate source rows
-txn-duplicate-001,duplicate,intentional duplicate source rows
-txn-already-resolved-001,already_resolved,ticket already resolved

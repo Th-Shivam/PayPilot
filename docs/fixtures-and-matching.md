@@ -37,8 +37,10 @@ loader's `failed_ticket_embeddings` report rather than being stored without vect
 
 ```python
 from pathlib import Path
+from backend.embeddings import EmbeddingService
 from backend.scripts.load_fixtures import load_csvs
 
+embedding_service = EmbeddingService()
 load_csvs(Path("data"), supabase_client, embedding_service)
 ```
 
@@ -46,8 +48,10 @@ For an existing database whose tickets were loaded before embeddings were enable
 run the backfill once:
 
 ```python
+from backend.embeddings import EmbeddingService
 from backend.scripts.load_fixtures import backfill_ticket_embeddings
 
+embedding_service = EmbeddingService()
 backfill_ticket_embeddings(supabase_client, embedding_service)
 ```
 

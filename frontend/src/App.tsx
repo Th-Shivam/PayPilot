@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, ReactElement } from 'react'
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { IntroScreen } from './components/IntroScreen'
+import { SignInPage } from './pages/SignInPage'
+import { SignUpPage } from './pages/SignUpPage'
 import './App.css'
 import './auth.css'
 import {
@@ -10,57 +14,14 @@ import {
 import type { ResolveResponse, TraceEvent } from './lib/api'
 import { authConfigured, supabase, type AuthSession } from './lib/supabase'
 
+const INTRO_DURATION_MS = 4000
+
 function readableName(name: string): string {
   return name.replaceAll('_', ' ')
 }
 
 function statusLabel(status: TraceEvent['status']): string {
   return status.replaceAll('_', ' ')
-}
-
-function AuthScreen(): ReactElement {
-  const [mode, setMode] = useState<'sign_in' | 'sign_up'>('sign_in')
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [message, setMessage] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault()
-    if (!supabase || busy) return
-    setBusy(true)
-    setMessage(null)
-    const result = mode === 'sign_in'
-      ? await supabase.auth.signInWithPassword({ email, password })
-      : await supabase.auth.signUp({ email, password })
-    if (result.error) {
-      setMessage(result.error.message)
-    } else if (mode === 'sign_up' && !result.data.session) {
-      setMessage('Check your email to confirm the account, then sign in.')
-    }
-    setBusy(false)
-  }
-
-  return (
-    <main className="auth-shell">
-      <section className="auth-panel" aria-labelledby="auth-title">
-        <p className="eyebrow">PAYPILOT / SECURE ACCESS</p>
-        <h1 id="auth-title">{mode === 'sign_in' ? 'Sign in' : 'Create your account'}</h1>
-        <p className="lede">Use your Supabase account to access transaction operations.</p>
-        <form className="auth-form" onSubmit={submit}>
-          <label htmlFor="auth-email">Email</label>
-          <input id="auth-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} required autoComplete="email" />
-          <label htmlFor="auth-password">Password</label>
-          <input id="auth-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} required minLength={6} autoComplete={mode === 'sign_in' ? 'current-password' : 'new-password'} />
-          <button type="submit" disabled={busy}>{busy ? 'Working...' : mode === 'sign_in' ? 'Sign in' : 'Sign up'}</button>
-        </form>
-        {message ? <p className="auth-message" role="alert">{message}</p> : null}
-        <button className="link-button" type="button" onClick={() => { setMode(mode === 'sign_in' ? 'sign_up' : 'sign_in'); setMessage(null) }}>
-          {mode === 'sign_in' ? 'Need an account? Sign up' : 'Already registered? Sign in'}
-        </button>
-      </section>
-    </main>
-  )
 }
 
 function ResolutionApp({ session }: { session: AuthSession | null }): ReactElement {
@@ -163,9 +124,15 @@ function ResolutionApp({ session }: { session: AuthSession | null }): ReactEleme
   )
 }
 
-function App(): ReactElement {
+export function App(): ReactElement {
+  const [showIntro, setShowIntro] = useState(true)
   const [session, setSession] = useState<AuthSession | null>(null)
   const [authLoading, setAuthLoading] = useState(authConfigured)
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowIntro(false), INTRO_DURATION_MS)
+    return () => window.clearTimeout(timer)
+  }, [])
 
   useEffect(() => {
     if (!supabase) {
@@ -188,9 +155,23 @@ function App(): ReactElement {
     }
   }, [])
 
+  if (showIntro) return <IntroScreen />
   if (authLoading) return <main className="auth-shell"><p>Restoring your session...</p></main>
-  if (authConfigured && !session) return <AuthScreen />
-  return <ResolutionApp session={session} />
+
+  // With Supabase unconfigured the local auth-disabled development flow stays
+  // usable: the operations dashboard is reachable without a session.
+  const authenticated = !authConfigured || session !== null
+
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/sign-up" element={authenticated ? <Navigate to="/" replace /> : <SignUpPage />} />
+        <Route path="/sign-in" element={authenticated ? <Navigate to="/" replace /> : <SignInPage />} />
+        <Route path="/" element={authenticated ? <ResolutionApp session={session} /> : <Navigate to="/sign-up" replace />} />
+        <Route path="*" element={<Navigate to={authenticated ? '/' : '/sign-up'} replace />} />
+      </Routes>
+    </BrowserRouter>
+  )
 }
 
 export default App

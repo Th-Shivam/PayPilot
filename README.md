@@ -12,6 +12,7 @@ PayPilot is a transaction reconciliation assistant. The frontend is a React/Vite
 1. Install frontend dependencies:
 
    ```bash
+   cd frontend
    npm install
    ```
 
@@ -41,10 +42,19 @@ backend/.venv/bin/python -m uvicorn backend.app.main:app --reload --host 127.0.0
 Start the frontend in a second terminal:
 
 ```bash
+cd frontend
 npm run dev
 ```
 
-The frontend uses `http://127.0.0.1:8000` by default. To point it at another backend, set `VITE_API_BASE_URL` in a root `.env.local` file and restart Vite.
+The frontend uses `http://127.0.0.1:8000` by default. To point it at another backend, set `VITE_API_BASE_URL` in `frontend/.env.local` and restart Vite.
+
+Frontend checks run from the frontend directory:
+
+```bash
+cd frontend
+npm run build
+npm run lint
+```
 
 ## API checks
 

@@ -1,5 +1,3 @@
-import { supabase } from './supabase'
-
 const DEFAULT_API_BASE_URL = 'http://127.0.0.1:8000'
 
 export const API_BASE_URL = (
@@ -86,28 +84,13 @@ export interface AnalyticsResponse {
   by_confidence: Record<string, number>
 }
 
-async function fetchWithAuth(
-  path: string,
-  init: RequestInit,
-  retryOnUnauthorized = true,
-): Promise<Response> {
+async function fetchApi(path: string, init: RequestInit): Promise<Response> {
   const headers = new Headers(init.headers)
   if (!headers.has('Accept')) headers.set('Accept', 'application/json')
-  if (supabase) {
-    const { data } = await supabase.auth.getSession()
-    const accessToken = data.session?.access_token
-    if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`)
-  }
-  const response = await fetch(`${API_BASE_URL}/${path.replace(/^\/+/, '')}`, {
+  return fetch(`${API_BASE_URL}/${path.replace(/^\/+/, '')}`, {
     ...init,
     headers,
   })
-  if (response.status === 401 && retryOnUnauthorized && supabase) {
-    const refreshed = await supabase.auth.refreshSession()
-    if (refreshed.data.session) return fetchWithAuth(path, init, false)
-    await supabase.auth.signOut()
-  }
-  return response
 }
 
 async function throwApiError(response: Response): Promise<never> {
@@ -124,7 +107,7 @@ async function throwApiError(response: Response): Promise<never> {
 }
 
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetchWithAuth(path, init)
+  const response = await fetchApi(path, init)
   if (!response.ok) await throwApiError(response)
   return (await response.json()) as T
 }
@@ -190,7 +173,7 @@ export async function streamResolve(
   onEvent: (event: TraceEvent) => void,
   signal?: AbortSignal,
 ): Promise<ResolveResponse> {
-  const response = await fetchWithAuth('resolve', {
+  const response = await fetchApi('resolve', {
     method: 'POST',
     headers: {
       Accept: 'text/event-stream',

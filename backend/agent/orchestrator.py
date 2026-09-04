@@ -98,7 +98,12 @@ class GroqOrchestrator:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max(0, min(max_retries, 3))
 
-    def run(self, txn_id: str, diagnosis: dict[str, Any]) -> AgentRunResult:
+    def run(
+        self,
+        txn_id: str,
+        diagnosis: dict[str, Any],
+        on_trace: Callable[[TraceEvent], None] | None = None,
+    ) -> AgentRunResult:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": load_system_prompt() + '\n\nFinal answer must be a JSON object with exactly these keys: {"explanation": string (2-4 sentences), "status": string, "action": string}. Set "status" to the diagnosis match_status and "action" to the diagnosis action, verbatim.'},
             {"role": "user", "content": json.dumps({"txn_id": txn_id, "diagnosis": diagnosis}, default=str)},
@@ -106,12 +111,19 @@ class GroqOrchestrator:
         trace: list[TraceEvent] = []
         used_fallback = False
         model = self.model
+
+        def record(event: TraceEvent) -> None:
+            trace.append(event)
+            if on_trace is not None:
+                on_trace(event)
+
         for step in range(1, self.max_steps + 1):
             try:
-                completion = self._complete(model, messages)
+                completion = self._complete(model, messages, step, record)
             except Exception as exc:
                 if model == self.fallback_model:
                     raise GroqOrchestrationError("Groq unavailable after fallback") from exc
+                record(TraceEvent(step, "retry", "groq_completion", {"reason": "primary_model_failed", "from_model": model, "to_model": self.fallback_model}))
                 model = self.fallback_model
                 used_fallback = True
                 continue
@@ -122,12 +134,12 @@ class GroqOrchestrator:
                 for call in tool_calls:
                     name = call.function.name
                     args = json.loads(call.function.arguments or "{}")
-                    trace.append(TraceEvent(step, "tool_call", name, args))
+                    record(TraceEvent(step, "tool_call", name, args))
                     if name not in self.handlers:
                         result = {"error": "tool_not_available"}
                     else:
                         result = self.handlers[name](**args)
-                    trace.append(TraceEvent(step, "tool_result", name, result if isinstance(result, dict) else {"value": result}))
+                    record(TraceEvent(step, "tool_result", name, result if isinstance(result, dict) else {"value": result}))
                     messages.append({"role": "tool", "tool_call_id": call.id, "name": name, "content": json.dumps(result, default=str)})
                 continue
             try:
@@ -137,14 +149,20 @@ class GroqOrchestrator:
                 raise GroqOrchestrationError("Groq returned an invalid final response") from exc
             authoritative_status = str(diagnosis.get("match_status", diagnosis.get("status", final.status)))
             if final.status != authoritative_status or final.action != str(diagnosis.get("action", final.action)):
-                trace.append(TraceEvent(step, "diagnosis_divergence", "model_output", {"model_status": final.status, "authoritative_status": authoritative_status, "model_action": final.action, "authoritative_action": diagnosis.get("action")}))
+                record(TraceEvent(step, "diagnosis_divergence", "model_output", {"model_status": final.status, "authoritative_status": authoritative_status, "model_action": final.action, "authoritative_action": diagnosis.get("action")}))
             final.status = authoritative_status
             if diagnosis.get("action"):
                 final.action = str(diagnosis["action"])
             return AgentRunResult(final, trace, model, used_fallback)
         raise GroqOrchestrationError("Maximum agent steps exceeded")
 
-    def _complete(self, model: str, messages: list[dict[str, Any]]) -> Any:
+    def _complete(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        step: int,
+        on_trace: Callable[[TraceEvent], None],
+    ) -> Any:
         last_error: Exception | None = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -162,6 +180,7 @@ class GroqOrchestrator:
             except Exception as exc:
                 last_error = exc
                 if attempt < self.max_retries:
+                    on_trace(TraceEvent(step, "retry", "groq_completion", {"model": model, "attempt": attempt + 1, "reason": str(exc)[:120]}))
                     time.sleep(min(0.25 * (2**attempt), 1.0))
         raise last_error or GroqOrchestrationError("Groq completion failed")
 

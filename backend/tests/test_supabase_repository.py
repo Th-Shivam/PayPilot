@@ -45,8 +45,12 @@ def test_supabase_repository_uses_shared_pending_rule_and_persists_trace():
     repo = SupabaseRepository(client, reference_time=default_reference_time())
     result = repo.resolve("txn-pending")
     assert result["status"] == "pending"
-    assert len(client.inserted) == 4
-    assert all(table == "agent_trace_logs" for table, _ in client.inserted)
+    trace_rows = [row for table, row, _ in client.upserted if table == "agent_trace_logs"]
+    assert len(trace_rows) >= 9
+    assert [row["step_number"] for row in trace_rows] == list(range(1, len(trace_rows) + 1))
+    assert all(row["event_id"] == f"{row['run_id']}:{row['step_number']}" for row in trace_rows)
+    assert trace_rows[0]["event_type"] == "tool_start"
+    assert trace_rows[-1]["event_type"] == "completion"
 
 
 def test_supabase_reads_tickets_and_analytics():
@@ -64,3 +68,19 @@ def test_authorized_ticket_action_persists_embedding():
     assert table == "tickets"
     assert conflict == "txn_id"
     assert len(row["embedding"]) == 384
+
+
+def test_owner_scoped_supabase_reads_follow_gateway_ownership_path():
+    client = FakeClient()
+    client.tables["gateway_transactions"] = [
+        {"txn_id": "txn-a", "owner_id": "owner-a"},
+        {"txn_id": "txn-b", "owner_id": "owner-b"},
+    ]
+    client.tables["tickets"] = [
+        {"txn_id": "txn-a", "diagnosis": "clean", "explanation": "A", "action_taken": "no_action_needed", "confidence": "high"},
+        {"txn_id": "txn-b", "diagnosis": "clean", "explanation": "B", "action_taken": "no_action_needed", "confidence": "high"},
+    ]
+    repo = SupabaseRepository(client)
+    assert repo.can_access_transaction("txn-a", "owner-a")
+    assert not repo.can_access_transaction("txn-b", "owner-a")
+    assert [row["txn_id"] for row in repo.tickets(owner_id="owner-a")] == ["txn-a"]

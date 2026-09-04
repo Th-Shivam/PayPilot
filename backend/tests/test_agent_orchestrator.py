@@ -41,6 +41,16 @@ def test_orchestrator_retains_tool_trace_and_diagnosis_wins():
     assert [event.kind for event in result.trace][:2] == ["tool_call", "tool_result"]
 
 
+def test_orchestrator_publishes_trace_events_as_operations_complete():
+    call = type("Call", (), {"id": "c1", "function": type("Fn", (), {"name": "lookup_gateway", "arguments": '{"txn_id":"txn-1"}'})()})()
+    client = FakeClient([FakeMessage(tool_calls=[call]), FakeMessage(content='{"status":"clean","action":"no_action_needed","explanation":"matched"}')])
+    published = []
+    GroqOrchestrator(client, {"lookup_gateway": lambda txn_id: {"txn_id": txn_id}}, model="primary").run(
+        "txn-1", {"match_status": "clean"}, on_trace=published.append
+    )
+    assert [event.kind for event in published[:2]] == ["tool_call", "tool_result"]
+
+
 def test_orchestrator_records_model_diagnosis_divergence():
     client = FakeClient([FakeMessage(content='{"status":"anomaly","action":"escalated","explanation":"ok"}')])
     result = GroqOrchestrator(client, {}, model="primary").run("txn-1", {"match_status": "clean", "action": "no_action_needed"})

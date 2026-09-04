@@ -36,20 +36,6 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/*
- * The intro and sign-in/sign-up screens paint their own light artwork on top of
- * a dark page, while the operations dashboard is a light document surface.
- * Scope the dashboard palette to the dashboard instead of forcing one global
- * background on both.
- */
-body:has(.shell) {
-  background-color: var(--ops-surface);
-  color: var(--ops-ink);
-  font-family: var(--ops-sans);
-  font-size: 16px;
-  line-height: 145%;
-}
-
 #root {
   width: 100%;
   min-height: 100vh;

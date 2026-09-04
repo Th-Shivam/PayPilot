@@ -14,3 +14,12 @@ def test_ticket_schema_contains_repository_contract_columns():
 def test_canonical_migrations_are_ordered_without_legacy_duplicates():
     names = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
     assert names == ["0001_extensions.sql", "0002_core_tables.sql", "0003_tickets_and_traces.sql", "0004_similarity_search.sql", "0005_rls_policies.sql"]
+
+
+def test_similarity_rpc_is_bounded_and_uses_pgvector_cosine_distance():
+    migration = (MIGRATIONS / "0004_similarity_search.sql").read_text(encoding="utf-8")
+    assert "create or replace function match_tickets" in migration
+    assert "query_embedding vector(384)" in migration
+    assert "1 - (t.embedding <=> query_embedding)" in migration
+    assert "limit least(greatest(match_count, 1), 20)" in migration
+    assert "using hnsw (embedding vector_cosine_ops)" in migration

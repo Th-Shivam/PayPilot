@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from .config import Settings, get_settings
 from .repository import SupabaseRepository, TransactionNotFound, UnavailableRepository
 from backend.agent import GroqOrchestrator
+from backend.embeddings import EmbeddingService
 from .schemas import AnalyticsResponse, ErrorResponse, ReconcileRequest, ReconcileResponse, ResolveRequest, ResolveResponse, TicketResponse, TraceMetadata
 
 
@@ -31,6 +32,10 @@ def create_app(settings: Settings | None = None, repository: Any | None = None) 
     async def invalid(request: Request, exc: RequestValidationError) -> JSONResponse:
         return JSONResponse(status_code=422, content={"error": {"code": "INVALID_REQUEST", "message": "Request validation failed.", "request_id": request.headers.get("x-request-id", str(uuid4()))}})
 
+    @app.exception_handler(ValueError)
+    async def invalid_value(request: Request, exc: ValueError) -> JSONResponse:
+        return JSONResponse(status_code=422, content={"error": {"code": "INVALID_REQUEST", "message": str(exc), "request_id": request.headers.get("x-request-id", str(uuid4()))}})
+
     @app.get("/health")
     async def health() -> dict[str, str]:
         return {"status": "ok", "service": runtime.app_name, "environment": runtime.app_env}
@@ -42,7 +47,10 @@ def create_app(settings: Settings | None = None, repository: Any | None = None) 
         trace = TraceMetadata.model_validate({"request_id": request_id, "run_id": row["run_id"], "created_at": row["created_at"], "steps": row["steps"]})
         return ResolveResponse(txn_id=payload.txn_id, transaction_id=payload.txn_id, status=row["status"], explanation=row["explanation"], action=row["action"], trace=trace)
 
-    @app.get("/trace/{txn_id}", response_model=TraceMetadata, responses={404: {"model": ErrorResponse}})
+    @app.get("/trace/{txn_id}", response_model=TraceMetadata, include_in_schema=False, responses={404: {"model": ErrorResponse}})
+    async def trace_alias(txn_id: str) -> TraceMetadata:
+        return TraceMetadata.model_validate(await asyncio.to_thread(repo.trace, txn_id))
+
     @app.get("/trace/{transaction_id}", response_model=TraceMetadata, include_in_schema=True, responses={404: {"model": ErrorResponse}})
     async def trace(transaction_id: str) -> TraceMetadata:
         return TraceMetadata.model_validate(await asyncio.to_thread(repo.trace, transaction_id))
@@ -86,7 +94,13 @@ def _repository(settings: Settings) -> Any:
             max_steps=settings.agent_max_steps,
             timeout_seconds=settings.groq_timeout_seconds,
         )
-    return SupabaseRepository(client, orchestrator=orchestrator)
+    return SupabaseRepository(
+        client,
+        orchestrator=orchestrator,
+        embedding_service=EmbeddingService(settings.embedding_model),
+        similarity_threshold=settings.similarity_threshold,
+        similarity_match_count=settings.similarity_match_count,
+    )
 
 
 app = create_app()

@@ -9,6 +9,7 @@ from backend.domain.models import BankSettlementRecord, FixtureCase, GatewayReco
 from backend.reconciliation.rules import classify_transaction
 from backend.agent import GroqOrchestrationError
 from backend.agent_tools import search_similar_tickets
+from backend.embeddings import EmbeddingService, EmbeddingServiceError
 
 
 class TransactionNotFound(LookupError):
@@ -89,10 +90,13 @@ def json_safe(value: Any) -> str:
 class SupabaseRepository:
     """Synchronous canonical-schema adapter. API callers run it off-loop."""
 
-    def __init__(self, client: Any, reference_time: datetime | None = None, orchestrator: Any | None = None) -> None:
+    def __init__(self, client: Any, reference_time: datetime | None = None, orchestrator: Any | None = None, embedding_service: EmbeddingService | None = None, similarity_threshold: float = 0.75, similarity_match_count: int = 3) -> None:
         self.client = client
         self.reference_time = reference_time or datetime.now(timezone.utc)
         self.orchestrator = orchestrator
+        self.embedding_service = embedding_service or EmbeddingService()
+        self.similarity_threshold = similarity_threshold
+        self.similarity_match_count = similarity_match_count
 
     def _one(self, table: str, txn_id: str) -> dict[str, Any] | None:
         aliases = {"gateway_transactions": "gateway_records", "ledger_entries": "ledger_records"}
@@ -135,7 +139,7 @@ class SupabaseRepository:
                     "lookup_gateway": lambda txn_id: self._one("gateway_transactions", txn_id),
                     "lookup_bank": lambda txn_id: self._one("bank_settlements", txn_id),
                     "lookup_ledger": lambda txn_id: self._one("ledger_entries", txn_id),
-                    "search_similar_tickets": lambda query, limit=5: self._similar_tickets(query, limit),
+                    "search_similar_tickets": lambda query, limit=None: self._similar_tickets(query, limit),
                     "create_ledger_entry": lambda txn_id: self._create_ledger_entry(txn_id, diagnosis),
                     "raise_ticket": lambda txn_id, reason: self._raise_ticket(txn_id, reason, diagnosis),
                     "close_as_resolved": lambda txn_id: self._close_as_resolved(txn_id, diagnosis),
@@ -171,6 +175,10 @@ class SupabaseRepository:
         if diagnosis["match_status"] not in {"anomaly", "amount_mismatch"}:
             return {"status": "not_authorized", "txn_id": txn_id}
         row = {"txn_id": txn_id, "diagnosis": diagnosis["match_status"], "explanation": reason, "action_taken": "escalated", "confidence": diagnosis["confidence"], "detail": diagnosis["detail"]}
+        try:
+            row["embedding"] = self.embedding_service.embed(reason)
+        except (EmbeddingServiceError, ValueError, TypeError):
+            pass
         self.client.table("tickets").upsert(row, on_conflict="txn_id").execute()
         return {"status": "created", "txn_id": txn_id}
 
@@ -179,10 +187,9 @@ class SupabaseRepository:
             return {"status": "not_authorized", "txn_id": txn_id}
         return {"status": "authorized", "txn_id": txn_id}
 
-    def _similar_tickets(self, query: str, limit: int = 5) -> dict[str, Any]:
+    def _similar_tickets(self, query: str, limit: int | None = None) -> dict[str, Any]:
         try:
-            from backend.embeddings import EmbeddingService
-            return {"results": search_similar_tickets(query, self.client, EmbeddingService(), limit=limit)}
+            return {"results": search_similar_tickets(query, self.client, self.embedding_service, threshold=self.similarity_threshold, limit=limit or self.similarity_match_count)}
         except Exception:
             return {"results": []}
 

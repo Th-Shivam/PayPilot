@@ -2,6 +2,12 @@ from datetime import datetime, timezone
 
 from backend.app.repository import SupabaseRepository
 from backend.reconciliation.rules import default_reference_time
+from backend.embeddings import EmbeddingService
+
+
+class FakeEmbeddingModel:
+    def encode(self, text, **kwargs):
+        return [1.0] + [0.0] * 383
 
 
 class Query:
@@ -47,3 +53,14 @@ def test_supabase_reads_tickets_and_analytics():
     repo = SupabaseRepository(FakeClient(), reference_time=default_reference_time())
     assert repo.tickets()[0]["txn_id"] == "txn-pending"
     assert repo.analytics()["by_confidence"] == {"high": 1}
+
+
+def test_authorized_ticket_action_persists_embedding():
+    client = FakeClient()
+    repo = SupabaseRepository(client, embedding_service=EmbeddingService(model=FakeEmbeddingModel()))
+    result = repo._raise_ticket("txn-pending", "Review mismatch", {"match_status": "anomaly", "confidence": "low_flagged_for_review", "detail": {}})
+    assert result["status"] == "created"
+    table, row, conflict = client.upserted[-1]
+    assert table == "tickets"
+    assert conflict == "txn_id"
+    assert len(row["embedding"]) == 384

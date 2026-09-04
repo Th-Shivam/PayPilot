@@ -6,6 +6,8 @@ import csv
 from pathlib import Path
 from typing import Any
 
+from backend.embeddings import EMBEDDING_DIMENSION
+
 
 def read_rows(path: Path) -> list[dict[str, str]]:
     with path.open(encoding="utf-8", newline="") as handle:
@@ -28,7 +30,10 @@ def load_csvs(output_dir: Path, supabase: Any, embeddings: Any | None = None) ->
     if embeddings is not None:
         for ticket in tickets:
             try:
-                ticket["embedding"] = embeddings.embed(ticket["explanation"])
+                vector = embeddings.embed(ticket["explanation"])
+                if len(vector) != EMBEDDING_DIMENSION:
+                    raise ValueError("embedding has unexpected dimension")
+                ticket["embedding"] = vector
             except Exception:
                 failed_embeddings.append(ticket["ticket_id"])
         tickets = [ticket for ticket in tickets if "embedding" in ticket]
@@ -36,6 +41,25 @@ def load_csvs(output_dir: Path, supabase: Any, embeddings: Any | None = None) ->
     if tickets:
         supabase.table("tickets").upsert(tickets, on_conflict="txn_id").execute()
     return {"failed_ticket_embeddings": failed_embeddings}
+
+
+def backfill_ticket_embeddings(supabase: Any, embeddings: Any) -> dict[str, list[str]]:
+    """Populate missing ticket vectors without rewriting existing ticket facts."""
+    response = supabase.table("tickets").select("txn_id,explanation").is_("embedding", "null").execute()
+    failed: list[str] = []
+    updated: list[str] = []
+    for ticket in response.data or []:
+        txn_id = ticket.get("txn_id")
+        try:
+            vector = embeddings.embed(ticket["explanation"])
+            if len(vector) != EMBEDDING_DIMENSION:
+                raise ValueError("embedding has unexpected dimension")
+            supabase.table("tickets").upsert({"txn_id": txn_id, "embedding": vector}, on_conflict="txn_id").execute()
+            updated.append(txn_id)
+        except Exception:
+            if txn_id:
+                failed.append(txn_id)
+    return {"updated_ticket_embeddings": updated, "failed_ticket_embeddings": failed}
 
 
 def _canonical_row(table: str, row: dict[str, str]) -> dict[str, str]:

@@ -9,6 +9,7 @@ from backend.domain.models import BankSettlementRecord, FixtureCase, GatewayReco
 from backend.reconciliation.rules import classify_transaction
 from backend.agent import GroqOrchestrationError
 from backend.agent_tools import search_similar_tickets
+from backend.embeddings import EmbeddingService, EmbeddingServiceError
 
 
 class TransactionNotFound(LookupError):
@@ -89,10 +90,13 @@ def json_safe(value: Any) -> str:
 class SupabaseRepository:
     """Synchronous canonical-schema adapter. API callers run it off-loop."""
 
-    def __init__(self, client: Any, reference_time: datetime | None = None, orchestrator: Any | None = None) -> None:
+    def __init__(self, client: Any, reference_time: datetime | None = None, orchestrator: Any | None = None, embedding_service: EmbeddingService | None = None, similarity_threshold: float = 0.75, similarity_match_count: int = 3) -> None:
         self.client = client
         self.reference_time = reference_time or datetime.now(timezone.utc)
         self.orchestrator = orchestrator
+        self.embedding_service = embedding_service or EmbeddingService()
+        self.similarity_threshold = similarity_threshold
+        self.similarity_match_count = similarity_match_count
 
     def _one(self, table: str, txn_id: str) -> dict[str, Any] | None:
         aliases = {"gateway_transactions": "gateway_records", "ledger_entries": "ledger_records"}
@@ -111,12 +115,14 @@ class SupabaseRepository:
             raise TransactionNotFound(txn_id)
         bank = self._one("bank_settlements", txn_id)
         ledger = self._one("ledger_entries", txn_id)
+        if ledger is not None and ledger.get("source", "agent_reconciliation") == "agent_reconciliation":
+            return {"status": "already_exists", "txn_id": txn_id, "record": ledger, "action_key": action_key or f"create_ledger_entry:{txn_id}"}
         case = self._case(gateway, bank, ledger)
         status = classify_transaction(case, self.reference_time).value
         action, explanation = self._outcome(status)
         diagnosis = {
             "match_status": status,
-            "confidence": "low_flagged_for_review" if status in {"anomaly", "amount_mismatch"} else "high",
+            "confidence": "low_flagged_for_review" if status == "anomaly" else "high",
             "action": action,
             "detail": {"gateway_present": True, "bank_present": bank is not None, "ledger_present": ledger is not None},
         }
@@ -135,10 +141,10 @@ class SupabaseRepository:
                     "lookup_gateway": lambda txn_id: self._one("gateway_transactions", txn_id),
                     "lookup_bank": lambda txn_id: self._one("bank_settlements", txn_id),
                     "lookup_ledger": lambda txn_id: self._one("ledger_entries", txn_id),
-                    "search_similar_tickets": lambda query, limit=5: self._similar_tickets(query, limit),
-                    "create_ledger_entry": lambda txn_id: self._create_ledger_entry(txn_id, diagnosis),
-                    "raise_ticket": lambda txn_id, reason: self._raise_ticket(txn_id, reason, diagnosis),
-                    "close_as_resolved": lambda txn_id: self._close_as_resolved(txn_id, diagnosis),
+                    "search_similar_tickets": lambda query, limit=None: self._similar_tickets(query, limit),
+                    "create_ledger_entry": lambda txn_id, evidence=None: self.create_ledger_entry(txn_id, evidence=evidence or diagnosis),
+                    "raise_ticket": lambda txn_id, reason, evidence=None: self.raise_ticket(txn_id, reason=reason, evidence=evidence or diagnosis),
+                    "close_as_resolved": lambda txn_id, evidence=None: self.close_as_resolved(txn_id, evidence=evidence or diagnosis),
                 }
                 run = self.orchestrator.run(txn_id, diagnosis)
                 explanation = run.response.explanation
@@ -157,32 +163,72 @@ class SupabaseRepository:
                 pass
         return {"txn_id": txn_id, "status": status, "action": action, "explanation": explanation, "request_id": request_id, "run_id": run_id, "created_at": datetime.now(timezone.utc), "steps": steps}
 
-    def _create_ledger_entry(self, txn_id: str, diagnosis: dict[str, Any]) -> dict[str, Any]:
-        if diagnosis["match_status"] != "ledger_gap":
-            return {"status": "not_authorized", "txn_id": txn_id}
+    def create_ledger_entry(self, txn_id: str, evidence: dict[str, Any] | None = None, action_key: str | None = None) -> dict[str, Any]:
+        if not evidence or evidence.get("match_status") != "ledger_gap":
+            return {"status": "not_authorized", "txn_id": txn_id, "reason": "structured ledger_gap evidence is required"}
         gateway = self._one("gateway_transactions", txn_id)
         if gateway is None:
             raise TransactionNotFound(txn_id)
+        bank = self._one("bank_settlements", txn_id)
+        ledger = self._one("ledger_entries", txn_id)
+        if ledger is not None and ledger.get("source", "agent_reconciliation") == "agent_reconciliation":
+            return {"status": "already_exists", "txn_id": txn_id, "record": ledger, "action_key": action_key or f"create_ledger_entry:{txn_id}"}
+        case = self._case(gateway, bank, ledger)
+        if classify_transaction(case, self.reference_time).value != "ledger_gap" or not bank or abs(float(gateway["amount"]) - float(bank["amount"])) > 0.01:
+            return {"status": "not_authorized", "txn_id": txn_id, "reason": "current records are not a valid ledger_gap"}
+        if ledger is not None:
+            return {"status": "already_exists", "txn_id": txn_id, "record": ledger, "action_key": action_key or f"create_ledger_entry:{txn_id}"}
         row = {"txn_id": txn_id, "amount": gateway["amount"], "currency": gateway["currency"], "status": "recorded", "source": "agent_reconciliation", "recorded_at": datetime.now(timezone.utc).isoformat()}
-        self.client.table("ledger_entries").upsert(row, on_conflict="txn_id").execute()
-        return {"status": "created", "txn_id": txn_id}
-
-    def _raise_ticket(self, txn_id: str, reason: str, diagnosis: dict[str, Any]) -> dict[str, Any]:
-        if diagnosis["match_status"] not in {"anomaly", "amount_mismatch"}:
-            return {"status": "not_authorized", "txn_id": txn_id}
-        row = {"txn_id": txn_id, "diagnosis": diagnosis["match_status"], "explanation": reason, "action_taken": "escalated", "confidence": diagnosis["confidence"], "detail": diagnosis["detail"]}
-        self.client.table("tickets").upsert(row, on_conflict="txn_id").execute()
-        return {"status": "created", "txn_id": txn_id}
-
-    def _close_as_resolved(self, txn_id: str, diagnosis: dict[str, Any]) -> dict[str, Any]:
-        if diagnosis["match_status"] not in {"clean", "pending"}:
-            return {"status": "not_authorized", "txn_id": txn_id}
-        return {"status": "authorized", "txn_id": txn_id}
-
-    def _similar_tickets(self, query: str, limit: int = 5) -> dict[str, Any]:
         try:
-            from backend.embeddings import EmbeddingService
-            return {"results": search_similar_tickets(query, self.client, EmbeddingService(), limit=limit)}
+            self.client.table("ledger_entries").upsert(row, on_conflict="txn_id").execute()
+        except Exception:
+            existing = self._one("ledger_entries", txn_id)
+            if existing is not None:
+                return {"status": "already_exists", "txn_id": txn_id, "record": existing, "action_key": action_key or f"create_ledger_entry:{txn_id}"}
+            raise
+        return {"status": "created", "txn_id": txn_id, "record": row, "action_key": action_key or f"create_ledger_entry:{txn_id}"}
+
+    def raise_ticket(self, txn_id: str, reason: str, evidence: dict[str, Any] | None = None, action_key: str | None = None) -> dict[str, Any]:
+        if not reason or not reason.strip() or not evidence:
+            return {"status": "not_authorized", "txn_id": txn_id, "reason": "reason and structured evidence are required"}
+        gateway = self._one("gateway_transactions", txn_id)
+        if gateway is None:
+            raise TransactionNotFound(txn_id)
+        case = self._case(gateway, self._one("bank_settlements", txn_id), self._one("ledger_entries", txn_id))
+        status = classify_transaction(case, self.reference_time).value
+        if status not in {"anomaly", "amount_mismatch"} or evidence.get("match_status") != status:
+            return {"status": "not_authorized", "txn_id": txn_id, "reason": "current diagnosis does not authorize a ticket"}
+        confidence = "low_flagged_for_review" if status == "anomaly" else "high"
+        row = {"txn_id": txn_id, "diagnosis": status, "explanation": reason.strip(), "action_taken": "escalated", "confidence": confidence, "detail": {"evidence": evidence, "action_key": action_key or f"raise_ticket:{txn_id}"}}
+        try:
+            row["embedding"] = self.embedding_service.embed(reason)
+        except (EmbeddingServiceError, ValueError, TypeError):
+            pass
+        self.client.table("tickets").upsert(row, on_conflict="txn_id").execute()
+        return {"status": "created", "txn_id": txn_id, "record": row, "action_key": action_key or f"raise_ticket:{txn_id}"}
+
+    def close_as_resolved(self, txn_id: str, evidence: dict[str, Any] | None = None, action_key: str | None = None) -> dict[str, Any]:
+        if not evidence:
+            return {"status": "not_authorized", "txn_id": txn_id, "reason": "structured evidence is required"}
+        gateway = self._one("gateway_transactions", txn_id)
+        ticket = self.client.table("tickets").select("*").eq("txn_id", txn_id).limit(1).execute().data
+        if gateway is None or not ticket:
+            raise TransactionNotFound(txn_id)
+        case = self._case(gateway, self._one("bank_settlements", txn_id), self._one("ledger_entries", txn_id))
+        status = classify_transaction(case, self.reference_time).value
+        if status not in {"clean", "pending"} or evidence.get("match_status") != status:
+            return {"status": "not_authorized", "txn_id": txn_id, "reason": "transaction is not safely resolvable"}
+        update = {"action_taken": "no_action_needed", "resolved_at": datetime.now(timezone.utc).isoformat(), "detail": {"evidence": evidence, "action_key": action_key or f"close_as_resolved:{txn_id}"}}
+        self.client.table("tickets").update(update).eq("txn_id", txn_id).execute()
+        return {"status": "closed", "txn_id": txn_id, "record": {**ticket[0], **update}, "action_key": action_key or f"close_as_resolved:{txn_id}"}
+
+    _create_ledger_entry = create_ledger_entry
+    _raise_ticket = raise_ticket
+    _close_as_resolved = close_as_resolved
+
+    def _similar_tickets(self, query: str, limit: int | None = None) -> dict[str, Any]:
+        try:
+            return {"results": search_similar_tickets(query, self.client, self.embedding_service, threshold=self.similarity_threshold, limit=limit or self.similarity_match_count)}
         except Exception:
             return {"results": []}
 

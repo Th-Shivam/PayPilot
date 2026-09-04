@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from threading import Lock
 from typing import Any, Sequence
 
@@ -7,6 +8,8 @@ from typing import Any, Sequence
 class EmbeddingServiceError(RuntimeError):
     pass
 
+
+EMBEDDING_DIMENSION = 384
 
 class EmbeddingService:
     """Lazy-load all-MiniLM-L6-v2 once per process and reuse it."""
@@ -35,7 +38,14 @@ class EmbeddingService:
             values: Sequence[float] = self._get_model().encode(
                 text.strip(), convert_to_numpy=False, normalize_embeddings=True
             )
-            return [float(value) for value in values]
+            vector = [float(value) for value in values]
+            if len(vector) != EMBEDDING_DIMENSION:
+                raise EmbeddingServiceError(
+                    f"Embedding model returned {len(vector)} dimensions; expected {EMBEDDING_DIMENSION}"
+                )
+            if not all(math.isfinite(value) for value in vector):
+                raise EmbeddingServiceError("Embedding model returned a non-finite value")
+            return vector
         except EmbeddingServiceError:
             raise
         except Exception as exc:

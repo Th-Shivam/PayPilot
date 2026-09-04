@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     groq_fallback_model: str = "llama-3.1-8b-instant"
     groq_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     agent_max_steps: int = Field(default=8, ge=1, le=8)
+    embedding_model: str = "all-MiniLM-L6-v2"
+    similarity_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
+    similarity_match_count: int = Field(default=3, ge=1, le=20)
     supabase_url: str | None = None
     supabase_anon_key: SecretStr | None = None
     supabase_service_role_key: SecretStr | None = None

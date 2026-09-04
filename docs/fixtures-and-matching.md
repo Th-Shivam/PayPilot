@@ -41,3 +41,22 @@ from backend.scripts.load_fixtures import load_csvs
 
 load_csvs(Path("data"), supabase_client, embedding_service)
 ```
+
+For an existing database whose tickets were loaded before embeddings were enabled,
+run the backfill once:
+
+```python
+from backend.scripts.load_fixtures import backfill_ticket_embeddings
+
+backfill_ticket_embeddings(supabase_client, embedding_service)
+```
+
+The embedding service uses `all-MiniLM-L6-v2` and writes 384-dimensional vectors
+before ticket upsert. The first model load downloads the sentence-transformers
+model and its PyTorch runtime; cache it on the machine used for the demo. If the
+model cannot load, the loader reports failed ticket IDs and the resolve path still
+returns its deterministic diagnosis without similar-case results.
+
+Similarity search uses `SIMILARITY_THRESHOLD` and `SIMILARITY_MATCH_COUNT` from
+the backend environment. The RPC caps results at 20 and ignores tickets whose
+embedding is null, so an empty or low-similarity search safely returns no rows.

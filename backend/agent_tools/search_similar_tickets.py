@@ -17,11 +17,12 @@ def search_similar_tickets(
     bounded_limit = max(1, min(int(limit), 50))
     try:
         response = supabase.rpc(
-            "search_similar_tickets",
+            "match_tickets",
             {
                 "query_embedding": embeddings.embed(query),
                 "match_threshold": threshold,
                 "match_count": bounded_limit,
+                "exclude_txn_id": None,
             },
         ).execute()
         results = []
@@ -29,9 +30,9 @@ def search_similar_tickets(
             score = float(row.get("score", row.get("similarity", 0)))
             if score >= threshold:
                 results.append({
-                    "ticket_id": row.get("ticket_id", row.get("id")),
+                "ticket_id": row.get("ticket_id", row.get("txn_id")),
                     "score": score,
-                    "status": row.get("status"),
+                "status": row.get("status", row.get("diagnosis")),
                     "explanation": row.get("explanation"),
                 })
         return results

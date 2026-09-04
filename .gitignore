@@ -19,7 +19,7 @@ __pycache__/
 .pytest_cache/
 
 # Local secrets
-.env
+.env*
 !.env.example
 
 # Editor directories and files

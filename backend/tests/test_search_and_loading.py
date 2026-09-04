@@ -32,7 +32,7 @@ class FakeSupabase:
         return FakeQuery(self, name)
 
     def rpc(self, name, params):
-        assert name == "search_similar_tickets"
+        assert name == "match_tickets"
         assert len(params["query_embedding"]) == 2
         self.rpc_params = params
         return self
@@ -45,11 +45,11 @@ def test_loader_persists_ticket_embeddings_and_is_rerunnable(tmp_path: Path):
     seed_csv(tmp_path)
     client = FakeSupabase()
     load_csvs(tmp_path, client, EmbeddingService(model=FakeModel()))
-    assert [name for name, _, _ in client.upserts] == ["gateway_records", "bank_settlements", "ledger_records", "tickets"]
+    assert [name for name, _, _ in client.upserts] == ["gateway_transactions", "bank_settlements", "ledger_entries", "tickets"]
     tickets = client.upserts[-1][1]
     assert len(tickets) == 20
-    assert all("explanation_embedding" in ticket for ticket in tickets)
-    assert {ticket["resolution_path"] for ticket in tickets} >= {"clean", "ledger_gap", "pending", "anomaly", "amount_mismatch"}
+    assert all("embedding" in ticket for ticket in tickets)
+    assert {ticket["diagnosis"] for ticket in tickets} >= {"clean", "ledger_gap", "pending", "anomaly", "amount_mismatch"}
 
 
 def test_similarity_search_is_bounded_and_structured():

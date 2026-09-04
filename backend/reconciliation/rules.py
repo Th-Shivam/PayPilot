@@ -1,8 +1,14 @@
 """Deterministic reconciliation logic. The core of PS-8's hard constraint.
 
-Nothing here calls an LLM, touches the network, or reads the clock. Given the
-same three records and the same reference time, the verdict is always identical.
-The LLM's only job downstream is wording the result.
+`_compare_records` calls no LLM, touches no network, and never reads the clock.
+Given the same three records and the same reference time, the verdict is always
+identical. The LLM's only job downstream is wording the result.
+
+`compare_records` is a thin traced wrapper over it. The span exists so the
+verdict — match_status, confidence, reason_code — is visible in Logfire
+*upstream* of the Groq span that follows: the decision is already made, by code,
+before the model is handed anything. Tracing only observes; disabling it changes
+nothing about the result.
 
 Precedence, highest first:
 
@@ -32,6 +38,7 @@ from backend.domain.models import (
     LedgerEntry,
     MatchStatus,
 )
+from backend.observability import span
 
 # Amounts are numeric(14,2) in Postgres. A tolerance of half a paisa absorbs
 # float representation error without masking a real discrepancy.
@@ -82,7 +89,43 @@ def compare_records(
     txn_id: str | None = None,
     settlement_window: timedelta = DEFAULT_SETTLEMENT_WINDOW,
 ) -> Diagnosis:
-    """Return the deterministic diagnosis for one transaction.
+    """Return the deterministic diagnosis for one transaction, traced.
+
+    The span carries the verdict and nothing else: no record fields, so no
+    customer identity crosses the boundary here. `Diagnosis.detail` does embed
+    the source records, and it reaches Logfire only via the redacted repository
+    span downstream.
+    """
+    with span("reconciliation.compare_records") as active:
+        verdict = _compare_records(
+            gateway, bank, ledger, reference_time, txn_id, settlement_window
+        )
+        active.set(
+            **{
+                "reconciliation.txn_id": verdict.txn_id,
+                "reconciliation.match_status": verdict.match_status.value,
+                "reconciliation.confidence": verdict.confidence.value,
+                "reconciliation.reason_code": verdict.reason_code,
+                "reconciliation.mismatched_fields": verdict.detail.get("mismatched_fields", []),
+                "reconciliation.sources_present": [
+                    name
+                    for name, record in (("gateway", gateway), ("bank", bank), ("ledger", ledger))
+                    if record is not None
+                ],
+            }
+        )
+        return verdict
+
+
+def _compare_records(
+    gateway: GatewayTransaction | None,
+    bank: BankSettlement | None,
+    ledger: LedgerEntry | None,
+    reference_time: datetime,
+    txn_id: str | None = None,
+    settlement_window: timedelta = DEFAULT_SETTLEMENT_WINDOW,
+) -> Diagnosis:
+    """The pure rule engine. Every rule test exercises this through the wrapper.
 
     `reference_time` is passed in rather than read from the clock so the result
     is reproducible and testable.

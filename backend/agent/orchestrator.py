@@ -8,6 +8,8 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.observability import redact, redact_prompt, span, truncate_response
+
 
 MAX_AGENT_STEPS = 8
 DEFAULT_TIMEOUT_SECONDS = 20.0
@@ -104,6 +106,44 @@ class GroqOrchestrator:
         diagnosis: dict[str, Any],
         on_trace: Callable[[TraceEvent], None] | None = None,
     ) -> AgentRunResult:
+        """Word the deterministic diagnosis, traced end to end.
+
+        The span records what the run settled on, and the `groq.chat_completion`
+        spans nested under it record what was sent and what came back. Read
+        together with the `reconciliation.compare_records` span that precedes
+        them, they are the evidence that the model was handed a finished verdict
+        and never got a vote on it.
+        """
+        with span(
+            "agent.run",
+            **{
+                "agent.txn_id": txn_id,
+                "agent.max_steps": self.max_steps,
+                "groq.model": self.model,
+                "groq.fallback_model": self.fallback_model,
+                "reconciliation.match_status": diagnosis.get("match_status"),
+                "reconciliation.reason_code": diagnosis.get("reason_code"),
+            },
+        ) as active:
+            result = self._run(txn_id, diagnosis, on_trace)
+            active.set(
+                **{
+                    "groq.model_used": result.model,
+                    "groq.fallback_used": result.fallback_used,
+                    "agent.trace_events": len(result.trace),
+                    "agent.diagnosis_divergence": any(event.kind == "diagnosis_divergence" for event in result.trace),
+                    "agent.final_status": result.response.status,
+                    "agent.final_action": result.response.action,
+                }
+            )
+            return result
+
+    def _run(
+        self,
+        txn_id: str,
+        diagnosis: dict[str, Any],
+        on_trace: Callable[[TraceEvent], None] | None = None,
+    ) -> AgentRunResult:
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": load_system_prompt()},
             {"role": "user", "content": json.dumps({"txn_id": txn_id, "diagnosis": diagnosis}, default=str)},
@@ -135,11 +175,14 @@ class GroqOrchestrator:
                     name = call.function.name
                     args = json.loads(call.function.arguments or "{}")
                     record(TraceEvent(step, "tool_call", name, args))
-                    if name not in self.handlers:
-                        result = {"error": "tool_not_available"}
-                    else:
-                        result = self.handlers[name](**args)
-                    record(TraceEvent(step, "tool_result", name, result if isinstance(result, dict) else {"value": result}))
+                    with span(f"agent.tool.{name}", **{"tool.name": name, "tool.step": step, "tool.arguments": args}) as tool_span:
+                        if name not in self.handlers:
+                            result = {"error": "tool_not_available"}
+                        else:
+                            result = self.handlers[name](**args)
+                        payload = result if isinstance(result, dict) else {"value": result}
+                        tool_span.set(**{"tool.result_status": payload.get("status") or ("error" if payload.get("error") else "ok"), "tool.result": redact(payload)})
+                    record(TraceEvent(step, "tool_result", name, payload))
                     messages.append({"role": "tool", "tool_call_id": call.id, "name": name, "content": json.dumps(result, default=str)})
                 continue
             try:
@@ -163,23 +206,64 @@ class GroqOrchestrator:
         step: int,
         on_trace: Callable[[TraceEvent], None],
     ) -> Any:
+        """One Groq call, with retries, captured as a single span.
+
+        Both sides of the exchange land on the span: the prompt as it was sent,
+        redacted and truncated, and the response as it came back. Full records do
+        travel in the user message — `Diagnosis.detail` embeds them — so
+        `redact_prompt` is the boundary that keeps `customer_name` and the bank
+        `utr` out of Logfire while leaving the amounts and statuses that make the
+        capture worth reading.
+        """
         last_error: Exception | None = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                return self.client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    tools=tool_schemas(),
-                    tool_choice="auto",
-                    response_format={"type": "json_object"},
-                    timeout=self.timeout_seconds,
+        with span(
+            "groq.chat_completion",
+            **{
+                "groq.model": model,
+                "groq.step": step,
+                "groq.max_retries": self.max_retries,
+                "groq.timeout_seconds": self.timeout_seconds,
+                "groq.prompt": redact_prompt(messages),
+                "groq.prompt_messages": len(messages),
+            },
+        ) as active:
+            for attempt in range(self.max_retries + 1):
+                try:
+                    completion = self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        tools=tool_schemas(),
+                        tool_choice="auto",
+                        response_format={"type": "json_object"},
+                        timeout=self.timeout_seconds,
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    if attempt < self.max_retries:
+                        on_trace(TraceEvent(step, "retry", "groq_completion", {"model": model, "attempt": attempt + 1, "reason": str(exc)[:120]}))
+                        time.sleep(min(0.25 * (2**attempt), 1.0))
+                    continue
+                content, tool_call_names = self._completion_summary(completion)
+                active.set(
+                    **{
+                        "groq.attempts": attempt + 1,
+                        "groq.response": truncate_response(content),
+                        "groq.response_tool_calls": tool_call_names,
+                    }
                 )
-            except Exception as exc:
-                last_error = exc
-                if attempt < self.max_retries:
-                    on_trace(TraceEvent(step, "retry", "groq_completion", {"model": model, "attempt": attempt + 1, "reason": str(exc)[:120]}))
-                    time.sleep(min(0.25 * (2**attempt), 1.0))
-        raise last_error or GroqOrchestrationError("Groq completion failed")
+                return completion
+            active.set(**{"groq.attempts": self.max_retries + 1, "groq.failure_reason": str(last_error)[:200]})
+            raise last_error or GroqOrchestrationError("Groq completion failed")
+
+    @staticmethod
+    def _completion_summary(completion: Any) -> tuple[str, list[str]]:
+        """What the model said, defensively: never fail a run to describe one."""
+        try:
+            message = completion.choices[0].message
+            names = [call.function.name for call in (getattr(message, "tool_calls", None) or [])]
+            return str(message.content or ""), names
+        except Exception:
+            return "", []
 
     @staticmethod
     def _tool_call_dict(call: Any) -> dict[str, Any]:

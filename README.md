@@ -74,3 +74,7 @@ The health endpoint returns a stable response such as:
 ## Configuration safety
 
 Never commit `.env` or `.env.local`. They are ignored by Git. Use `backend/.env.example` as the shareable list of variable names. Production startup fails with the names of missing required variables, without printing secret values.
+
+## Observability
+
+Set `LOGFIRE_TOKEN` to trace resolves in [Logfire](https://logfire.pydantic.dev); leave it unset and PayPilot logs locally instead, with the resolve path unchanged. Every response carries `X-Request-Id`, every error body repeats it as `request_id`, and pasting that id into Logfire returns the whole run. Customer identity and credentials are stripped before anything reaches a span; amounts and statuses are kept, because they are the reconciliation signal. See [docs/observability.md](docs/observability.md).

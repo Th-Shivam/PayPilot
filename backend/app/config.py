@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://localhost:5173"
 
     groq_api_key: SecretStr | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
+    groq_fallback_model: str = "llama-3.1-8b-instant"
+    groq_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    agent_max_steps: int = Field(default=8, ge=1, le=8)
     supabase_url: str | None = None
     supabase_anon_key: SecretStr | None = None
     supabase_service_role_key: SecretStr | None = None

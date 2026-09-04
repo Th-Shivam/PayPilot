@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from .config import Settings, get_settings
 from .repository import SupabaseRepository, TransactionNotFound, UnavailableRepository
+from backend.agent import GroqOrchestrator
 from .schemas import AnalyticsResponse, ErrorResponse, ReconcileRequest, ReconcileResponse, ResolveRequest, ResolveResponse, TicketResponse, TraceMetadata
 
 
@@ -73,7 +74,19 @@ def _repository(settings: Settings) -> Any:
     if not settings.supabase_url or not settings.supabase_service_role_key:
         return UnavailableRepository()
     from supabase import create_client
-    return SupabaseRepository(create_client(settings.supabase_url, settings.supabase_service_role_key.get_secret_value()))
+    client = create_client(settings.supabase_url, settings.supabase_service_role_key.get_secret_value())
+    orchestrator = None
+    if settings.groq_api_key:
+        from groq import Groq
+        orchestrator = GroqOrchestrator(
+            Groq(api_key=settings.groq_api_key.get_secret_value()),
+            {},
+            model=settings.groq_model,
+            fallback_model=settings.groq_fallback_model,
+            max_steps=settings.agent_max_steps,
+            timeout_seconds=settings.groq_timeout_seconds,
+        )
+    return SupabaseRepository(client, orchestrator=orchestrator)
 
 
 app = create_app()

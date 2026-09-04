@@ -20,6 +20,7 @@ from fastapi.testclient import TestClient
 from backend.app.config import Settings
 from backend.app.main import create_app
 from backend.app.repository import SupabaseRepository
+from backend.embeddings import EmbeddingService
 from backend.reconciliation.rules import default_reference_time
 from backend.scripts.seed_fixtures import generate_cases
 
@@ -122,6 +123,15 @@ class FakeSupabase:
         return _Query(self.tables.setdefault(name, []))
 
 
+class FakeEmbeddingModel:
+    def encode(self, text: str, **_: Any) -> list[float]:
+        return [1.0] + [0.0] * 383
+
+
+def _embedding_service() -> EmbeddingService:
+    return EmbeddingService(model=FakeEmbeddingModel())
+
+
 def _seed_tables() -> dict[str, list[dict[str, Any]]]:
     """Build the three feed tables from the real fixture generator."""
     gateway: list[dict[str, Any]] = []
@@ -178,7 +188,11 @@ def seeded_tables() -> dict[str, list[dict[str, Any]]]:
 @pytest.fixture
 def repo(seeded_tables: dict[str, list[dict[str, Any]]]) -> SupabaseRepository:
     """Real repository over the fake, no orchestrator (deterministic only)."""
-    return SupabaseRepository(FakeSupabase(seeded_tables), reference_time=REFERENCE)
+    return SupabaseRepository(
+        FakeSupabase(seeded_tables),
+        reference_time=REFERENCE,
+        embedding_service=_embedding_service(),
+    )
 
 
 @pytest.fixture
@@ -191,7 +205,12 @@ def make_client(seeded_tables: dict[str, list[dict[str, Any]]]):
     """Factory to build a client with an orchestrator wired in."""
 
     def _build(orchestrator: Any | None = None) -> tuple[TestClient, SupabaseRepository]:
-        built = SupabaseRepository(FakeSupabase(seeded_tables), reference_time=REFERENCE, orchestrator=orchestrator)
+        built = SupabaseRepository(
+            FakeSupabase(seeded_tables),
+            reference_time=REFERENCE,
+            orchestrator=orchestrator,
+            embedding_service=_embedding_service(),
+        )
         return TestClient(create_app(Settings(require_auth=False), built)), built
 
     return _build

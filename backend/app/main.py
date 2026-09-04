@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
-from uuid import uuid4
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
@@ -17,6 +15,21 @@ from .repository import SupabaseRepository, TransactionNotFound, UnavailableRepo
 from backend.agent import GroqOrchestrator
 from backend.domain.trace import TraceEvent
 from backend.embeddings import EmbeddingService
+from backend.observability import (
+    ERROR_CLASS_BUG,
+    ERROR_CLASS_DEPENDENCY,
+    ERROR_CLASS_USER,
+    REQUEST_ID_HEADER,
+    REQUEST_ID_KEY,
+    RequestCorrelationMiddleware,
+    annotate_current_span,
+    configure_observability,
+    instrument_fastapi,
+    log_error,
+    log_exception,
+    log_warn,
+    request_id_for,
+)
 from .schemas import AnalyticsResponse, ErrorResponse, ReconcileRequest, ReconcileResponse, ResolveRequest, ResolveResponse, TicketResponse, TraceMetadata
 
 
@@ -24,53 +37,113 @@ class DependencyUnavailable(RuntimeError):
     """A repository/dependency failure safe for the public API boundary."""
 
 
+def _error_response(
+    request: Request,
+    *,
+    status_code: int,
+    code: str,
+    message: str,
+    error_class: str,
+    exc: BaseException | None = None,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    """Build one error response and one structured log line from one id.
+
+    The `request_id` in the body, the `X-Request-Id` header, and the trace this
+    request produced all carry the same value, so a support agent can read the
+    id off a failed response and land on the Logfire trace for it. Every handler
+    goes through here; deriving the id per handler — which is what this API used
+    to do — hands out a different one at each site for a single failed request.
+
+    The header is set explicitly rather than left to the correlation middleware
+    because the catch-all 500 handler runs inside Starlette's
+    `ServerErrorMiddleware`, which sits outside every user middleware.
+
+    `error_class` is the part a reader filters on: whose fault the failure was.
+    """
+    request_id = request_id_for(request)
+    detail: dict[str, Any] = {
+        REQUEST_ID_KEY: request_id,
+        "paypilot.error_code": code,
+        "paypilot.error_class": error_class,
+        "http.status_code": status_code,
+        "http.method": request.method,
+        "http.path": request.url.path,
+    }
+    if exc is not None:
+        detail["paypilot.failure_reason"] = type(exc).__name__
+    if error_class == ERROR_CLASS_BUG:
+        log_exception("request.failed", **detail)
+    elif error_class == ERROR_CLASS_DEPENDENCY:
+        log_error("request.failed", **detail)
+    else:
+        log_warn("request.failed", **detail)
+    annotate_current_span(**detail)
+    return JSONResponse(
+        status_code=status_code,
+        headers={**(headers or {}), REQUEST_ID_HEADER: request_id},
+        content={"error": {"code": code, "message": message, REQUEST_ID_KEY: request_id}},
+    )
+
+
 def create_app(settings: Settings | None = None, repository: Any | None = None, authenticator: Any | None = None) -> FastAPI:
     runtime = settings or get_settings()
     runtime.validate_for_runtime()
+    configure_observability(runtime)
     repo = repository or _repository(runtime)
     token_authenticator = authenticator or _authenticator(repo)
     current_user, support_agent = build_auth_dependencies(runtime, token_authenticator)
     app = FastAPI(title=runtime.app_name, version="0.2.0", description="PayPilot transaction reconciliation API")
     app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in runtime.allowed_origins.split(",") if x.strip()], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+    app.add_middleware(RequestCorrelationMiddleware)
 
     @app.exception_handler(TransactionNotFound)
     async def not_found(request: Request, exc: TransactionNotFound) -> JSONResponse:
-        return JSONResponse(status_code=404, content={"error": {"code": "TXN_NOT_FOUND", "message": "Transaction was not found.", "request_id": request.headers.get("x-request-id", str(uuid4()))}})
+        return _error_response(request, status_code=404, code="TXN_NOT_FOUND", message="Transaction was not found.", error_class=ERROR_CLASS_USER, exc=exc)
 
     @app.exception_handler(AuthError)
     async def auth_error(request: Request, exc: AuthError) -> JSONResponse:
-        return JSONResponse(
+        # 401/403 is the caller presenting the wrong credentials. A 5xx AuthError
+        # is the ownership check itself being unreachable, which is not.
+        error_class = ERROR_CLASS_DEPENDENCY if exc.status_code >= 500 else ERROR_CLASS_USER
+        return _error_response(
+            request,
             status_code=exc.status_code,
+            code=exc.code,
+            message=exc.message,
+            error_class=error_class,
+            exc=exc,
             headers={"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else None,
-            content={
-                "error": {
-                    "code": exc.code,
-                    "message": exc.message,
-                    "request_id": request.headers.get("x-request-id", str(uuid4())),
-                }
-            },
         )
 
     @app.exception_handler(RequestValidationError)
     async def invalid(request: Request, exc: RequestValidationError) -> JSONResponse:
-        return JSONResponse(status_code=422, content={"error": {"code": "INVALID_REQUEST", "message": "Request validation failed.", "request_id": request.headers.get("x-request-id", str(uuid4()))}})
+        return _error_response(request, status_code=422, code="INVALID_REQUEST", message="Request validation failed.", error_class=ERROR_CLASS_USER, exc=exc)
 
     @app.exception_handler(ValueError)
     async def invalid_value(request: Request, exc: ValueError) -> JSONResponse:
-        return JSONResponse(status_code=422, content={"error": {"code": "INVALID_REQUEST", "message": str(exc), "request_id": request.headers.get("x-request-id", str(uuid4()))}})
+        return _error_response(request, status_code=422, code="INVALID_REQUEST", message=str(exc), error_class=ERROR_CLASS_USER, exc=exc)
 
     @app.exception_handler(RuntimeError)
     async def dependency_error(request: Request, exc: RuntimeError) -> JSONResponse:
-        return JSONResponse(
+        return _error_response(
+            request,
             status_code=503,
-            content={
-                "error": {
-                    "code": "DEPENDENCY_UNAVAILABLE",
-                    "message": "A required backend dependency is temporarily unavailable.",
-                    "request_id": request.headers.get("x-request-id", str(uuid4())),
-                }
-            },
+            code="DEPENDENCY_UNAVAILABLE",
+            message="A required backend dependency is temporarily unavailable.",
+            error_class=ERROR_CLASS_DEPENDENCY,
+            exc=exc,
         )
+
+    @app.exception_handler(Exception)
+    async def unhandled(request: Request, exc: Exception) -> JSONResponse:
+        """Anything that reached here is a bug, not a caller or dependency fault.
+
+        Without this the caller gets Starlette's bare `Internal Server Error`
+        with no id to quote, which is the one failure mode nobody can follow up
+        on. The message stays generic; the traceback goes to the log.
+        """
+        return _error_response(request, status_code=500, code="INTERNAL_ERROR", message="An unexpected error occurred.", error_class=ERROR_CLASS_BUG, exc=exc)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -112,7 +185,20 @@ def create_app(settings: Settings | None = None, repository: Any | None = None, 
                         yield f"event: trace\nid: {event['event_id']}\ndata: {json.dumps(event, separators=(',', ':'))}\n\n"
                     elif kind == "error":
                         if not isinstance(value, TransactionNotFound):
-                            yield f"event: error\ndata: {json.dumps({'code': 'RESOLUTION_FAILED', 'message': 'Resolution could not be completed.'}, separators=(',', ':'))}\n\n"
+                            # The repository already logged why it failed; this
+                            # records that the caller was mid-stream when it did,
+                            # and hands them the id to quote.
+                            log_warn(
+                                "resolve.stream_failed",
+                                **{
+                                    REQUEST_ID_KEY: request_id,
+                                    "paypilot.txn_id": payload.txn_id,
+                                    "paypilot.error_code": "RESOLUTION_FAILED",
+                                    "paypilot.error_class": ERROR_CLASS_DEPENDENCY,
+                                    "paypilot.failure_reason": type(value).__name__,
+                                },
+                            )
+                            yield f"event: error\ndata: {json.dumps({'code': 'RESOLUTION_FAILED', 'message': 'Resolution could not be completed.', 'request_id': request_id}, separators=(',', ':'))}\n\n"
                     elif kind == "done":
                         break
             except asyncio.CancelledError:
@@ -122,7 +208,11 @@ def create_app(settings: Settings | None = None, repository: Any | None = None, 
                 if not worker.done():
                     worker.cancel()
 
-        return StreamingResponse(body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"})
+        return StreamingResponse(
+            body(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no", REQUEST_ID_HEADER: request_id},
+        )
 
     async def ensure_transaction_access(txn_id: str, user: AuthenticatedUser) -> None:
         if user.is_support_agent:
@@ -164,7 +254,7 @@ def create_app(settings: Settings | None = None, repository: Any | None = None, 
         },
     )
     async def resolve(payload: ResolveRequest, request: Request, _user: AuthenticatedUser = Depends(support_agent)) -> Any:
-        request_id = request.headers.get("x-request-id", str(uuid4()))
+        request_id = request_id_for(request)
         if "text/event-stream" in request.headers.get("accept", "").lower():
             return await stream_resolution(payload, request, request_id)
         row = await asyncio.to_thread(scoped_repository_call, repo.resolve, payload.txn_id, request_id)
@@ -202,12 +292,17 @@ def create_app(settings: Settings | None = None, repository: Any | None = None, 
 
     @app.post("/reconcile", response_model=ReconcileResponse, responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}})
     async def reconcile(payload: ReconcileRequest, request: Request, _user: AuthenticatedUser = Depends(support_agent)) -> ReconcileResponse:
+        request_id = request_id_for(request)
         if payload.date_from > payload.date_to:
-            return JSONResponse(status_code=422, content={"error": {"code": "INVALID_REQUEST", "message": "date_from must be before date_to", "request_id": request.headers.get("x-request-id", str(uuid4()))}})  # type: ignore[return-value]
-        request_id = request.headers.get("x-request-id", str(uuid4()))
+            return _error_response(request, status_code=422, code="INVALID_REQUEST", message="date_from must be before date_to", error_class=ERROR_CLASS_USER)  # type: ignore[return-value]
         rows = await asyncio.to_thread(scoped_repository_call, repo.reconcile, payload.date_from, payload.date_to, request_id)
         return ReconcileResponse(date_from=payload.date_from, date_to=payload.date_to, results=[ResolveResponse(txn_id=row.get("txn_id", row.get("transaction_id")), transaction_id=row.get("txn_id", row.get("transaction_id")), status=row["status"], explanation=row["explanation"], action=row["action"], trace=TraceMetadata(request_id=request_id, run_id=row["run_id"], created_at=row["created_at"], steps=row["steps"])) for row in rows])
 
+    # Last, deliberately: `add_middleware` inserts at the front of the stack, so
+    # whatever registers last ends up outermost. Instrumenting here puts the
+    # per-request span outside the correlation middleware, which is what lets
+    # that middleware stamp `request_id` onto a span that is already open.
+    instrument_fastapi(app)
     return app
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+from functools import wraps
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -17,6 +18,17 @@ from backend.agent import GroqOrchestrationError
 from backend.agent_tools import search_similar_tickets
 from backend.embeddings import EmbeddingService, EmbeddingServiceError
 from backend.domain.trace import TraceEvent
+from backend.observability import (
+    ERROR_CLASS_BUG,
+    ERROR_CLASS_DEPENDENCY,
+    ERROR_CLASS_USER,
+    REQUEST_ID_KEY,
+    log_error,
+    log_exception,
+    log_info,
+    log_warn,
+    span,
+)
 
 
 TraceCallback = Callable[[dict[str, Any]], None]
@@ -36,6 +48,23 @@ def _prune(row: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
 
 class TransactionNotFound(LookupError):
     pass
+
+
+def _failure_class(exc: BaseException) -> tuple[str, str]:
+    """Classify a resolve failure at the point it happens.
+
+    Deliberately the same mapping the API boundary applies, so the log written
+    here and the error body the caller receives agree on whose fault it was: a
+    missing or malformed transaction is the caller's, an unreachable dependency
+    is Supabase's or Groq's, and anything else is ours.
+    """
+    if isinstance(exc, TransactionNotFound):
+        return ERROR_CLASS_USER, "TXN_NOT_FOUND"
+    if isinstance(exc, ValueError):
+        return ERROR_CLASS_USER, "INVALID_REQUEST"
+    if isinstance(exc, RuntimeError):
+        return ERROR_CLASS_DEPENDENCY, "DEPENDENCY_UNAVAILABLE"
+    return ERROR_CLASS_BUG, "INTERNAL_ERROR"
 
 
 class UnavailableRepository:
@@ -165,6 +194,35 @@ def json_safe(value: Any) -> str:
     return json.dumps(value, default=str, sort_keys=True)
 
 
+def _traced_action(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Span a state-changing repository call.
+
+    Records what the write actually did, not what it was asked to do. All three
+    actions can legitimately return `not_authorized` when the current records no
+    longer match the evidence they were handed, and that refusal is the
+    interesting thing to find in a trace.
+    """
+
+    def decorate(func: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(func)
+        def wrapper(self: Any, txn_id: str, *args: Any, **kwargs: Any) -> Any:
+            with span(f"supabase.{name}", **{"paypilot.action": name, "supabase.txn_id": txn_id}) as active:
+                result = func(self, txn_id, *args, **kwargs)
+                if isinstance(result, dict):
+                    active.set(
+                        **{
+                            "paypilot.action_status": result.get("status"),
+                            "paypilot.action_key": result.get("action_key"),
+                            "paypilot.action_reason": result.get("reason"),
+                        }
+                    )
+                return result
+
+        return wrapper
+
+    return decorate
+
+
 class SupabaseRepository:
     """Synchronous canonical-schema adapter. API callers run it off-loop."""
 
@@ -180,15 +238,20 @@ class SupabaseRepository:
         aliases = {"gateway_transactions": "gateway_records", "ledger_entries": "ledger_records"}
         available = getattr(self.client, "tables", None)
         query_table = aliases.get(table, table) if isinstance(available, dict) and table not in available else table
-        response = self.client.table(query_table).select("*").eq("txn_id", txn_id).limit(1).execute()
-        row = (response.data or [None])[0]
-        if row is None and isinstance(available, dict):
-            # Legacy fixture clients keyed rows on transaction_id. The live
-            # schema has no such column, so only try this fallback against the
-            # in-memory test client, never against Postgres (where it 500s).
-            response = self.client.table(query_table).select("*").eq("transaction_id", txn_id).limit(1).execute()
+        with span("supabase.select", **{"supabase.table": query_table, "supabase.txn_id": txn_id}) as active:
+            response = self.client.table(query_table).select("*").eq("txn_id", txn_id).limit(1).execute()
             row = (response.data or [None])[0]
-        return row
+            matched_on = "txn_id" if row is not None else "none"
+            if row is None and isinstance(available, dict):
+                # Legacy fixture clients keyed rows on transaction_id. The live
+                # schema has no such column, so only try this fallback against the
+                # in-memory test client, never against Postgres (where it 500s).
+                response = self.client.table(query_table).select("*").eq("transaction_id", txn_id).limit(1).execute()
+                row = (response.data or [None])[0]
+                if row is not None:
+                    matched_on = "transaction_id"
+            active.set(**{"supabase.found": row is not None, "supabase.matched_on": matched_on})
+            return row
 
     def can_access_transaction(self, txn_id: str, user_id: str) -> bool:
         gateway = self._one("gateway_transactions", txn_id)
@@ -208,6 +271,62 @@ class SupabaseRepository:
         }
 
     def resolve(
+        self,
+        txn_id: str,
+        request_id: str = "local-request",
+        on_event: TraceCallback | None = None,
+    ) -> dict[str, Any]:
+        """Resolve one transaction, traced and logged as a single unit of work.
+
+        This is the span a reviewer opens. `request_id` is on it, so it is
+        reachable from any error body the UI showed, and every child span — the
+        Supabase reads, `reconciliation.compare_records`, the Groq exchange, each
+        tool call — hangs underneath it in order.
+
+        Exactly one structured log line closes the run, either the final action
+        or the failure reason with its error class. Both carry `request_id`.
+        """
+        with span("repository.resolve", **{"paypilot.txn_id": txn_id, REQUEST_ID_KEY: request_id}) as active:
+            try:
+                result = self._resolve(txn_id, request_id, on_event)
+            except Exception as exc:
+                error_class, error_code = _failure_class(exc)
+                active.set(**{"paypilot.outcome": "failed", "paypilot.error_code": error_code, "paypilot.error_class": error_class})
+                report = log_exception if error_class == ERROR_CLASS_BUG else log_warn if error_class == ERROR_CLASS_USER else log_error
+                report(
+                    "resolve.failed",
+                    **{
+                        REQUEST_ID_KEY: request_id,
+                        "paypilot.txn_id": txn_id,
+                        "paypilot.error_code": error_code,
+                        "paypilot.error_class": error_class,
+                        "paypilot.failure_reason": type(exc).__name__,
+                    },
+                )
+                raise
+            active.set(
+                **{
+                    "paypilot.outcome": "completed",
+                    "paypilot.run_id": result["run_id"],
+                    "paypilot.match_status": result["status"],
+                    "paypilot.action": result["action"],
+                    "paypilot.trace_steps": len(result["steps"]),
+                }
+            )
+            log_info(
+                "resolve.completed",
+                **{
+                    REQUEST_ID_KEY: request_id,
+                    "paypilot.txn_id": txn_id,
+                    "paypilot.run_id": result["run_id"],
+                    "paypilot.match_status": result["status"],
+                    "paypilot.action": result["action"],
+                    "paypilot.trace_steps": len(result["steps"]),
+                },
+            )
+            return result
+
+    def _resolve(
         self,
         txn_id: str,
         request_id: str = "local-request",
@@ -292,8 +411,22 @@ class SupabaseRepository:
                 }
                 run = self.orchestrator.run(txn_id, diagnosis, on_trace=lambda event: self._record_agent_trace(event, emit))
                 explanation = run.response.explanation
-            except GroqOrchestrationError:
+            except GroqOrchestrationError as exc:
                 emit("action", "groq_fallback", "warning", "Groq unavailable; deterministic explanation retained", {"action": action})
+                # The request still succeeds on the deterministic explanation, so
+                # this never reaches an error handler. Logged here or it is
+                # invisible: a degraded dependency behind a 200.
+                log_warn(
+                    "resolve.groq_unavailable",
+                    **{
+                        REQUEST_ID_KEY: request_id,
+                        "paypilot.txn_id": txn_id,
+                        "paypilot.error_class": ERROR_CLASS_DEPENDENCY,
+                        "paypilot.failure_reason": str(exc)[:200],
+                        "paypilot.action": action,
+                        "paypilot.degraded": True,
+                    },
+                )
         else:
             emit("action", "resolution_action", "success", f"Action: {action.replace('_', ' ')}", {"action": action})
 
@@ -320,12 +453,25 @@ class SupabaseRepository:
             "step_result": event["summary"],
             "detail": detail,
         }
-        query = self.client.table("agent_trace_logs")
-        upsert = getattr(query, "upsert", None)
-        if callable(upsert):
-            upsert(row, on_conflict="run_id,step_number").execute()
-        else:
-            query.insert(row).execute()
+        # Step metadata only. `detail` carries the source records and stays in
+        # the database row, where the schema owns it, rather than on the span.
+        with span(
+            "supabase.upsert",
+            **{
+                "supabase.table": "agent_trace_logs",
+                "supabase.txn_id": event["transaction_id"],
+                "trace.step_number": event["step_number"],
+                "trace.step_name": event["step_name"],
+                "trace.event_type": event["event_type"],
+                "trace.status": event["status"],
+            },
+        ):
+            query = self.client.table("agent_trace_logs")
+            upsert = getattr(query, "upsert", None)
+            if callable(upsert):
+                upsert(row, on_conflict="run_id,step_number").execute()
+            else:
+                query.insert(row).execute()
 
     @staticmethod
     def _record_agent_trace(agent_event: Any, emit: Callable[..., dict[str, Any]]) -> None:
@@ -355,6 +501,7 @@ class SupabaseRepository:
         elif kind == "diagnosis_divergence":
             emit("decision", "model_output", "warning", "Model output differed; deterministic diagnosis retained", detail)
 
+    @_traced_action("create_ledger_entry")
     def create_ledger_entry(self, txn_id: str, evidence: dict[str, Any] | None = None, action_key: str | None = None) -> dict[str, Any]:
         if not evidence or evidence.get("match_status") != "ledger_gap":
             return {"status": "not_authorized", "txn_id": txn_id, "reason": "structured ledger_gap evidence is required"}
@@ -379,6 +526,7 @@ class SupabaseRepository:
             raise
         return {"status": "created", "txn_id": txn_id, "record": row, "action_key": action_key or f"create_ledger_entry:{txn_id}"}
 
+    @_traced_action("raise_ticket")
     def raise_ticket(self, txn_id: str, reason: str, evidence: dict[str, Any] | None = None, action_key: str | None = None) -> dict[str, Any]:
         if not reason or not reason.strip() or not evidence:
             return {"status": "not_authorized", "txn_id": txn_id, "reason": "reason and structured evidence are required"}
@@ -397,6 +545,7 @@ class SupabaseRepository:
         self.client.table("tickets").upsert(row, on_conflict="txn_id").execute()
         return {"status": "created", "txn_id": txn_id, "record": row, "action_key": action_key or f"raise_ticket:{txn_id}"}
 
+    @_traced_action("close_as_resolved")
     def close_as_resolved(self, txn_id: str, evidence: dict[str, Any] | None = None, action_key: str | None = None) -> dict[str, Any]:
         if not evidence:
             return {"status": "not_authorized", "txn_id": txn_id, "reason": "structured evidence is required"}
@@ -478,16 +627,26 @@ class SupabaseRepository:
         return outcomes.get(status, ("escalated", "Unclassified transaction flagged for review."))
 
     def tickets(self, action_taken: str | None = None, confidence: str | None = None, owner_id: str | None = None) -> list[dict[str, Any]]:
-        query = self.client.table("tickets").select("txn_id,diagnosis,explanation,action_taken,confidence")
-        if action_taken:
-            query = query.eq("action_taken", action_taken)
-        if confidence:
-            query = query.eq("confidence", confidence)
-        rows = query.execute().data or []
-        if owner_id is not None:
-            owned_ids = self._owned_transaction_ids(owner_id)
-            rows = [row for row in rows if str(row.get("txn_id", row.get("transaction_id"))) in owned_ids]
-        return rows
+        with span(
+            "supabase.select",
+            **{
+                "supabase.table": "tickets",
+                "supabase.filter_action_taken": action_taken,
+                "supabase.filter_confidence": confidence,
+                "supabase.owner_scoped": owner_id is not None,
+            },
+        ) as active:
+            query = self.client.table("tickets").select("txn_id,diagnosis,explanation,action_taken,confidence")
+            if action_taken:
+                query = query.eq("action_taken", action_taken)
+            if confidence:
+                query = query.eq("confidence", confidence)
+            rows = query.execute().data or []
+            if owner_id is not None:
+                owned_ids = self._owned_transaction_ids(owner_id)
+                rows = [row for row in rows if str(row.get("txn_id", row.get("transaction_id"))) in owned_ids]
+            active.set(**{"supabase.row_count": len(rows)})
+            return rows
 
     def analytics(self, owner_id: str | None = None) -> dict[str, dict[str, int]]:
         rows = self.tickets(owner_id=owner_id)
@@ -504,17 +663,22 @@ class SupabaseRepository:
         return self.tickets(confidence="low_flagged_for_review", owner_id=owner_id)
 
     def trace(self, txn_id: str, owner_id: str | None = None) -> dict[str, Any]:
-        if owner_id is not None and not self.can_access_transaction(txn_id, owner_id):
-            raise TransactionNotFound(txn_id)
-        response = self.client.table("agent_trace_logs").select("*").eq("txn_id", txn_id).execute()
-        rows = response.data or []
-        if not rows:
-            raise TransactionNotFound(txn_id)
-        latest_run = max(rows, key=lambda row: self._trace_time(row)).get("run_id")
-        selected = [row for row in rows if row.get("run_id") == latest_run]
-        events = [self._canonical_event(row) for row in selected]
-        events.sort(key=lambda event: event["step_number"])
-        return {"request_id": events[0]["request_id"], "run_id": events[0]["run_id"], "created_at": events[0]["timestamp"], "steps": events}
+        with span(
+            "supabase.select",
+            **{"supabase.table": "agent_trace_logs", "supabase.txn_id": txn_id, "supabase.owner_scoped": owner_id is not None},
+        ) as active:
+            if owner_id is not None and not self.can_access_transaction(txn_id, owner_id):
+                raise TransactionNotFound(txn_id)
+            response = self.client.table("agent_trace_logs").select("*").eq("txn_id", txn_id).execute()
+            rows = response.data or []
+            if not rows:
+                raise TransactionNotFound(txn_id)
+            latest_run = max(rows, key=lambda row: self._trace_time(row)).get("run_id")
+            selected = [row for row in rows if row.get("run_id") == latest_run]
+            events = [self._canonical_event(row) for row in selected]
+            events.sort(key=lambda event: event["step_number"])
+            active.set(**{"supabase.row_count": len(rows), "trace.run_id": str(latest_run), "trace.step_count": len(events)})
+            return {"request_id": events[0]["request_id"], "run_id": events[0]["run_id"], "created_at": events[0]["timestamp"], "steps": events}
 
     @staticmethod
     def _trace_time(row: dict[str, Any]) -> datetime:
@@ -557,8 +721,26 @@ class SupabaseRepository:
         ).model_dump(mode="json")
 
     def reconcile(self, date_from: date, date_to: date, request_id: str, owner_id: str | None = None) -> list[dict[str, Any]]:
-        query = self.client.table("gateway_transactions").select("txn_id").gte("captured_at", date_from.isoformat()).lte("captured_at", f"{date_to.isoformat()}T23:59:59+00:00")
-        if owner_id is not None:
-            query = query.eq("owner_id", owner_id)
-        response = query.execute()
-        return [self.resolve(row["txn_id"], request_id) for row in (response.data or [])]
+        """Resolve every transaction in a date range under one parent span.
+
+        Each `repository.resolve` below nests inside this one, so a batch reads
+        as a single tree rather than N unrelated traces sharing a `request_id`.
+        """
+        with span(
+            "repository.reconcile",
+            **{
+                REQUEST_ID_KEY: request_id,
+                "paypilot.date_from": date_from.isoformat(),
+                "paypilot.date_to": date_to.isoformat(),
+                "supabase.owner_scoped": owner_id is not None,
+            },
+        ) as active:
+            query = self.client.table("gateway_transactions").select("txn_id").gte("captured_at", date_from.isoformat()).lte("captured_at", f"{date_to.isoformat()}T23:59:59+00:00")
+            if owner_id is not None:
+                query = query.eq("owner_id", owner_id)
+            response = query.execute()
+            rows = response.data or []
+            active.set(**{"paypilot.transactions_selected": len(rows)})
+            results = [self.resolve(row["txn_id"], request_id) for row in rows]
+            active.set(**{"paypilot.transactions_resolved": len(results)})
+            return results

@@ -5,10 +5,27 @@ from datetime import date, datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from backend.domain.models import BankSettlementRecord, FixtureCase, GatewayRecord, LedgerRecord
-from backend.reconciliation.rules import classify_transaction
+from backend.domain.models import (
+    BankSettlement,
+    Confidence,
+    GatewayTransaction,
+    LedgerEntry,
+    MatchStatus,
+)
+from backend.reconciliation.rules import compare_records
 from backend.agent import GroqOrchestrationError
 from backend.agent_tools import search_similar_tickets
+
+# Which record model owns which columns, and how each source's canonical
+# timestamp column maps onto the model field.
+_GATEWAY_FIELDS = set(GatewayTransaction.model_fields)
+_BANK_FIELDS = set(BankSettlement.model_fields)
+_LEDGER_FIELDS = set(LedgerEntry.model_fields)
+
+
+def _prune(row: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
+    """Keep only model fields; the DB row carries id/created_at/owner_id too."""
+    return {key: value for key, value in row.items() if key in allowed}
 
 
 class TransactionNotFound(LookupError):
@@ -111,14 +128,16 @@ class SupabaseRepository:
             raise TransactionNotFound(txn_id)
         bank = self._one("bank_settlements", txn_id)
         ledger = self._one("ledger_entries", txn_id)
-        case = self._case(gateway, bank, ledger)
-        status = classify_transaction(case, self.reference_time).value
+        g_record, b_record, l_record = self._records(gateway, bank, ledger)
+        verdict = compare_records(g_record, b_record, l_record, self.reference_time, txn_id=txn_id)
+        status = verdict.match_status.value
         action, explanation = self._outcome(status)
         diagnosis = {
             "match_status": status,
-            "confidence": "low_flagged_for_review" if status in {"anomaly", "amount_mismatch"} else "high",
+            "confidence": verdict.confidence.value,
+            "reason_code": verdict.reason_code,
             "action": action,
-            "detail": {"gateway_present": True, "bank_present": bank is not None, "ledger_present": ledger is not None},
+            "detail": verdict.detail,
         }
         run_id = str(uuid4())
         steps = [
@@ -186,19 +205,51 @@ class SupabaseRepository:
         except Exception:
             return {"results": []}
 
-    def _case(self, gateway: dict[str, Any], bank: dict[str, Any] | None, ledger: dict[str, Any] | None) -> FixtureCase:
-        expected = gateway.get("expected_settlement_at")
-        if expected is None:
-            raise ValueError("expected_settlement_at is required")
-        g = GatewayRecord(transaction_id=gateway.get("txn_id", gateway.get("transaction_id")), amount=gateway["amount"], currency=gateway["currency"], occurred_at=gateway.get("captured_at", gateway.get("occurred_at")), status=gateway["status"])
-        b = BankSettlementRecord(transaction_id=bank.get("txn_id", bank.get("transaction_id")), amount=bank.get("amount") or 0, currency=bank["currency"], occurred_at=bank.get("settled_at") or bank.get("occurred_at") or bank.get("created_at"), status=bank.get("status") or "pending", settled_at=bank.get("settled_at")) if bank else None
-        l = LedgerRecord(transaction_id=ledger.get("txn_id", ledger.get("transaction_id")), amount=ledger.get("amount") or 0, currency=ledger["currency"], occurred_at=ledger.get("recorded_at") or ledger.get("occurred_at") or ledger.get("created_at"), recorded_at=ledger.get("recorded_at") or ledger.get("occurred_at") or ledger.get("created_at"), status=ledger.get("status", "recorded")) if ledger else None
-        return FixtureCase(transaction_id=g.transaction_id, path="clean", gateway=g, bank=b, ledger=l, expected_settlement_at=expected)
+    def _records(
+        self,
+        gateway: dict[str, Any],
+        bank: dict[str, Any] | None,
+        ledger: dict[str, Any] | None,
+    ) -> tuple[GatewayTransaction, BankSettlement | None, LedgerEntry | None]:
+        """Turn raw DB rows into the typed records compare_records expects.
+
+        Older callers used transaction_id/occurred_at; the live schema uses
+        txn_id and per-source timestamp columns. Both are tolerated on read.
+        """
+        def canonicalise(row: dict[str, Any]) -> dict[str, Any]:
+            out = dict(row)
+            if "txn_id" not in out and "transaction_id" in out:
+                out["txn_id"] = out["transaction_id"]
+            return out
+
+        g_row = canonicalise(gateway)
+        if "captured_at" not in g_row and "occurred_at" in g_row:
+            g_row["captured_at"] = g_row["occurred_at"]
+        g = GatewayTransaction(**_prune(g_row, _GATEWAY_FIELDS))
+
+        b: BankSettlement | None = None
+        if bank is not None:
+            b_row = canonicalise(bank)
+            b = BankSettlement(**_prune(b_row, _BANK_FIELDS))
+
+        l: LedgerEntry | None = None
+        if ledger is not None:
+            l_row = canonicalise(ledger)
+            l = LedgerEntry(**_prune(l_row, _LEDGER_FIELDS))
+
+        return g, b, l
 
     @staticmethod
     def _outcome(status: str) -> tuple[str, str]:
-        outcomes = {"clean": ("no_action_needed", "Gateway, bank, and ledger records match."), "ledger_gap": ("ledger_entry_created", "Settlement exists but the ledger entry is missing."), "pending": ("no_action_needed", "Bank settlement is pending within the T+2 window."), "anomaly": ("escalated", "Settlement data is missing or outside the expected window."), "amount_mismatch": ("escalated", "Gateway and settlement amounts differ beyond tolerance.")}
-        return outcomes[status]
+        outcomes = {
+            "clean": ("no_action_needed", "Gateway, bank, and ledger records match."),
+            "ledger_gap": ("ledger_entry_created", "Settlement exists but the ledger entry is missing."),
+            "pending": ("no_action_needed", "Bank settlement is pending within the T+2 window."),
+            "anomaly": ("escalated", "Settlement data is missing or outside the expected window."),
+            "amount_mismatch": ("escalated", "Gateway and settlement amounts differ beyond tolerance."),
+            "unknown": ("escalated", "The transaction could not be classified from the available records."),
+        }
+        return outcomes.get(status, ("escalated", "Unclassified transaction flagged for review."))
 
     def tickets(self, action_taken: str | None = None, confidence: str | None = None) -> list[dict[str, Any]]:
         query = self.client.table("tickets").select("txn_id,diagnosis,explanation,action_taken,confidence")

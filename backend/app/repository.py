@@ -241,11 +241,15 @@ class SupabaseRepository:
         with span("supabase.select", **{"supabase.table": query_table, "supabase.txn_id": txn_id}) as active:
             response = self.client.table(query_table).select("*").eq("txn_id", txn_id).limit(1).execute()
             row = (response.data or [None])[0]
-            matched_on = "txn_id"
-            if row is None:
+            matched_on = "txn_id" if row is not None else "none"
+            if row is None and isinstance(available, dict):
+                # Legacy fixture clients keyed rows on transaction_id. The live
+                # schema has no such column, so only try this fallback against the
+                # in-memory test client, never against Postgres (where it 500s).
                 response = self.client.table(query_table).select("*").eq("transaction_id", txn_id).limit(1).execute()
                 row = (response.data or [None])[0]
-                matched_on = "transaction_id" if row is not None else "none"
+                if row is not None:
+                    matched_on = "transaction_id"
             active.set(**{"supabase.found": row is not None, "supabase.matched_on": matched_on})
             return row
 

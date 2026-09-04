@@ -62,6 +62,12 @@ class TicketResponse(BaseModel):
     explanation: str
     action_taken: str = "no_action_needed"
     confidence: str | float | None = None
+    reason_code: str | None = None
+    detail: dict[str, Any] = Field(default_factory=dict)
+    owner_id: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    resolved_at: datetime | None = None
 
     @model_validator(mode="after")
     def populate_aliases(self) -> Self:

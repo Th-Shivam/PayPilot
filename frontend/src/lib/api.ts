@@ -34,6 +34,15 @@ export interface TraceEvent {
   summary: string
   detail: Record<string, unknown>
   timestamp: string
+  step_status?: string
+  step_result?: string | null
+}
+
+export interface TraceMetadata {
+  request_id: string
+  run_id: string
+  created_at: string
+  steps: TraceEvent[]
 }
 
 export interface ResolveResponse {
@@ -42,12 +51,7 @@ export interface ResolveResponse {
   status: string
   explanation: string
   action: string
-  trace: {
-    request_id: string
-    run_id: string
-    created_at: string
-    steps: TraceEvent[]
-  }
+  trace: TraceMetadata
 }
 
 export class ApiClientError extends Error {
@@ -58,6 +62,28 @@ export class ApiClientError extends Error {
     this.name = 'ApiClientError'
     this.status = status
   }
+}
+
+export interface TicketRecord {
+  ticket_id?: string | null
+  txn_id?: string | null
+  transaction_id?: string | null
+  diagnosis?: string | null
+  status?: string | null
+  reason_code?: string | null
+  explanation: string
+  action_taken: string
+  confidence?: string | number | null
+  detail?: Record<string, unknown> | null
+  owner_id?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  resolved_at?: string | null
+}
+
+export interface AnalyticsResponse {
+  by_action: Record<string, number>
+  by_confidence: Record<string, number>
 }
 
 async function fetchWithAuth(
@@ -101,6 +127,26 @@ export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise
   const response = await fetchWithAuth(path, init)
   if (!response.ok) await throwApiError(response)
   return (await response.json()) as T
+}
+
+export function getTickets(): Promise<TicketRecord[]> {
+  return apiFetch<TicketRecord[]>('tickets')
+}
+
+export function getAnalytics(): Promise<AnalyticsResponse> {
+  return apiFetch<AnalyticsResponse>('analytics')
+}
+
+export function getTrace(transactionId: string): Promise<TraceMetadata> {
+  return apiFetch<TraceMetadata>(`trace/${encodeURIComponent(transactionId)}`)
+}
+
+export function resolveTransaction(transactionId: string): Promise<ResolveResponse> {
+  return apiFetch<ResolveResponse>('resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ txn_id: transactionId }),
+  })
 }
 
 function parseSseFrame(frame: string): { event: string; id?: string; data: string } {

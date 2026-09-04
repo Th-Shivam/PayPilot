@@ -25,6 +25,7 @@ export function SignInPage() {
     if (!supabase) {
       // Auth is not configured locally, so keep the credential-free preview flow.
       setStatus('Welcome back. Workspace ready.')
+      window.setTimeout(() => navigate('/dashboard'), 250)
       return
     }
 

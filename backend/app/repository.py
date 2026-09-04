@@ -636,7 +636,9 @@ class SupabaseRepository:
                 "supabase.owner_scoped": owner_id is not None,
             },
         ) as active:
-            query = self.client.table("tickets").select("txn_id,diagnosis,explanation,action_taken,confidence")
+            query = self.client.table("tickets").select(
+                "txn_id,diagnosis,reason_code,explanation,action_taken,confidence,detail,owner_id,created_at,updated_at,resolved_at"
+            )
             if action_taken:
                 query = query.eq("action_taken", action_taken)
             if confidence:

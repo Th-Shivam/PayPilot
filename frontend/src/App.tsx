@@ -3,6 +3,7 @@ import type { FormEvent, ReactElement } from 'react'
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { IntroScreen } from './components/IntroScreen'
 import { SignInPage } from './pages/SignInPage'
+import { DashboardPage } from './pages/DashboardPage'
 import { SignUpPage } from './pages/SignUpPage'
 import './App.css'
 import './auth.css'
@@ -167,6 +168,7 @@ export function App(): ReactElement {
       <Routes>
         <Route path="/sign-up" element={authenticated ? <Navigate to="/" replace /> : <SignUpPage />} />
         <Route path="/sign-in" element={authenticated ? <Navigate to="/" replace /> : <SignInPage />} />
+        <Route path="/dashboard" element={authenticated ? <DashboardPage /> : <Navigate to="/sign-in" replace />} />
         <Route path="/" element={authenticated ? <ResolutionApp session={session} /> : <Navigate to="/sign-up" replace />} />
         <Route path="*" element={<Navigate to={authenticated ? '/' : '/sign-up'} replace />} />
       </Routes>

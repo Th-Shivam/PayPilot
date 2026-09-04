@@ -23,6 +23,7 @@ def test_resolve_trace_and_error_contract():
     trace_res = client.get("/trace/txn-1")
     assert trace_res.status_code == 200
     assert trace_res.json()["request_id"] == "req-1"
+    assert client.get("/trace/txn-1").status_code == 200
 
     # Trace not found
     missing_trace = client.get("/trace/nonexistent")
@@ -124,10 +125,18 @@ def test_batch_reconcile_endpoint():
     assert err.status_code == 422
     assert err.json()["error"]["code"] == "INVALID_REQUEST"
 
+    value_error = InMemoryRepository({"txn-10": {"transaction_id": "txn-10", "status": "clean", "explanation": "Matched", "action": "no_action_needed", "occurred_at": datetime(2025, 1, 15, 10, 0, tzinfo=timezone.utc)}})
+    value_error.resolve = lambda *_args: (_ for _ in ()).throw(ValueError("bad persisted value"))
+    value_client = TestClient(create_app(Settings(), value_error))
+    value_response = value_client.post("/resolve", json={"txn_id": "txn-10"})
+    assert value_response.status_code == 422
+    assert value_response.json()["error"]["code"] == "INVALID_REQUEST"
+
 
 def test_openapi_and_cors_contract():
     client = TestClient(create_app(Settings(), InMemoryRepository()))
     schema = client.get("/openapi.json").json()
     assert {"/resolve", "/trace/{transaction_id}", "/tickets", "/exceptions", "/analytics", "/reconcile"} <= set(schema["paths"])
+    assert "/trace/{txn_id}" not in schema["paths"]
     cors = client.options("/resolve", headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "POST"})
     assert cors.headers.get("access-control-allow-origin") == "http://localhost:5173"

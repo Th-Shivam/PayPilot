@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from backend.embeddings import EmbeddingService, EmbeddingServiceError
+from backend.embeddings import EMBEDDING_DIMENSION, EmbeddingService, EmbeddingServiceError
 
 RPC_NAME = "match_tickets"
 MAX_RESULTS = 20  # Matches the server-side cap in match_tickets.
@@ -37,6 +37,9 @@ def search_similar_tickets(
     try:
         embedding = embeddings.embed(query)
     except (EmbeddingServiceError, ValueError):
+        return []
+
+    if len(embedding) != EMBEDDING_DIMENSION:
         return []
 
     try:

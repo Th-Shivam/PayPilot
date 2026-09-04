@@ -10,6 +10,8 @@ import csv
 from pathlib import Path
 from typing import Any
 
+from backend.embeddings import EMBEDDING_DIMENSION
+
 # CSV filename -> live table name.
 TABLE_FILES: dict[str, str] = {
     "gateway_transactions.csv": "gateway_transactions",
@@ -70,7 +72,10 @@ def load_csvs(
         if embeddings is not None:
             for ticket in tickets:
                 try:
-                    ticket["embedding"] = embeddings.embed(ticket["explanation"])
+                    vector = embeddings.embed(ticket["explanation"])
+                    if len(vector) != EMBEDDING_DIMENSION:
+                        raise ValueError("embedding has unexpected dimension")
+                    ticket["embedding"] = vector
                 except Exception:
                     failed_embeddings.append(ticket["txn_id"])
         if tickets:
@@ -78,3 +83,33 @@ def load_csvs(
 
     loaded["tickets"] = len(tickets)
     return {"loaded": loaded, "failed_ticket_embeddings": failed_embeddings}
+
+
+def backfill_ticket_embeddings(supabase: Any, embeddings: Any) -> dict[str, list[str]]:
+    """Populate missing ticket vectors without rewriting existing ticket facts.
+
+    Lets the demo seed tickets first (fast, no model download) and add
+    embeddings later, so similar-case search comes online without a reload.
+    """
+    response = (
+        supabase.table("tickets")
+        .select("txn_id,explanation")
+        .is_("embedding", "null")
+        .execute()
+    )
+    failed: list[str] = []
+    updated: list[str] = []
+    for ticket in getattr(response, "data", None) or []:
+        txn_id = ticket.get("txn_id")
+        try:
+            vector = embeddings.embed(ticket["explanation"])
+            if len(vector) != EMBEDDING_DIMENSION:
+                raise ValueError("embedding has unexpected dimension")
+            supabase.table("tickets").upsert(
+                {"txn_id": txn_id, "embedding": vector}, on_conflict="txn_id"
+            ).execute()
+            updated.append(txn_id)
+        except Exception:
+            if txn_id:
+                failed.append(txn_id)
+    return {"updated_ticket_embeddings": updated, "failed_ticket_embeddings": failed}

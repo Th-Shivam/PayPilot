@@ -14,7 +14,7 @@ from backend.agent_tools import (
 )
 from backend.embeddings import EmbeddingService
 from backend.reconciliation import default_reference_time
-from backend.scripts.load_fixtures import load_csvs
+from backend.scripts.load_fixtures import backfill_ticket_embeddings, load_csvs
 from backend.scripts.seed_fixtures import seed_csv
 
 REFERENCE = default_reference_time()
@@ -274,3 +274,49 @@ def test_similarity_search_returns_empty_on_empty_corpus():
     client = FakeSupabase()
     client.rpc_rows = []
     assert search_similar_tickets("q", client, EmbeddingService(model=FakeModel())) == []
+
+
+# --- backfill (from #21) -------------------------------------------------
+
+
+class BackfillClient:
+    """Fake client exposing the .is_() filter backfill needs."""
+
+    def __init__(self, missing: list[dict[str, Any]]):
+        self._missing = missing
+        self.upserts: list[tuple[str, dict[str, Any], str]] = []
+
+    def table(self, name: str) -> Any:
+        outer = self
+
+        class Query:
+            table_name = name
+            _rows: list[dict[str, Any]] = []
+
+            def select(self, *_: Any):
+                return self
+
+            def is_(self, *_: Any):
+                self._rows = outer._missing
+                return self
+
+            def upsert(self, row, on_conflict):
+                outer.upserts.append((self.table_name, row, on_conflict))
+                return self
+
+            def execute(self):
+                return type("R", (), {"data": self._rows})()
+
+        return Query()
+
+
+def test_backfill_ticket_embeddings_updates_only_missing_vectors():
+    client = BackfillClient([
+        {"txn_id": "TXNHIST001", "explanation": "Ledger entry missing and created."},
+        {"txn_id": "TXNHIST002", "explanation": "Bank record absent past the window."},
+    ])
+    result = backfill_ticket_embeddings(client, EmbeddingService(model=FakeModel()))
+    assert result["updated_ticket_embeddings"] == ["TXNHIST001", "TXNHIST002"]
+    assert result["failed_ticket_embeddings"] == []
+    # Only txn_id and embedding are written; existing ticket facts untouched.
+    assert all(set(row) == {"txn_id", "embedding"} for _, row, _ in client.upserts)

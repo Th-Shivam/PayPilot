@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import Depends, FastAPI, Request
@@ -322,8 +323,16 @@ def _repository(settings: Settings) -> Any:
             max_steps=settings.agent_max_steps,
             timeout_seconds=settings.groq_timeout_seconds,
         )
+    reference_time = None
+    if settings.reconciliation_reference_date:
+        # Pin the settlement-window reference (e.g. to the seeded fixture date)
+        # so diagnoses stay consistent instead of drifting as real time passes.
+        reference_time = datetime.fromisoformat(settings.reconciliation_reference_date)
+        if reference_time.tzinfo is None:
+            reference_time = reference_time.replace(tzinfo=timezone.utc)
     return SupabaseRepository(
         client,
+        reference_time=reference_time,
         orchestrator=orchestrator,
         embedding_service=EmbeddingService(settings.embedding_model),
         similarity_threshold=settings.similarity_threshold,

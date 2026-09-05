@@ -5,13 +5,12 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Settings, get_settings
-from .auth import AuthError, AuthenticatedUser, SupabaseAuthenticator, build_auth_dependencies
 from .repository import SupabaseRepository, TransactionNotFound, UnavailableRepository
 from backend.agent import GroqOrchestrator
 from backend.domain.trace import TraceEvent
@@ -87,13 +86,11 @@ def _error_response(
     )
 
 
-def create_app(settings: Settings | None = None, repository: Any | None = None, authenticator: Any | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, repository: Any | None = None) -> FastAPI:
     runtime = settings or get_settings()
     runtime.validate_for_runtime()
     configure_observability(runtime)
     repo = repository or _repository(runtime)
-    token_authenticator = authenticator or _authenticator(repo)
-    current_user, support_agent = build_auth_dependencies(runtime, token_authenticator)
     app = FastAPI(title=runtime.app_name, version="0.2.0", description="PayPilot transaction reconciliation API")
     app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in runtime.allowed_origins.split(",") if x.strip()], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
     app.add_middleware(RequestCorrelationMiddleware)
@@ -101,21 +98,6 @@ def create_app(settings: Settings | None = None, repository: Any | None = None, 
     @app.exception_handler(TransactionNotFound)
     async def not_found(request: Request, exc: TransactionNotFound) -> JSONResponse:
         return _error_response(request, status_code=404, code="TXN_NOT_FOUND", message="Transaction was not found.", error_class=ERROR_CLASS_USER, exc=exc)
-
-    @app.exception_handler(AuthError)
-    async def auth_error(request: Request, exc: AuthError) -> JSONResponse:
-        # 401/403 is the caller presenting the wrong credentials. A 5xx AuthError
-        # is the ownership check itself being unreachable, which is not.
-        error_class = ERROR_CLASS_DEPENDENCY if exc.status_code >= 500 else ERROR_CLASS_USER
-        return _error_response(
-            request,
-            status_code=exc.status_code,
-            code=exc.code,
-            message=exc.message,
-            error_class=error_class,
-            exc=exc,
-            headers={"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else None,
-        )
 
     @app.exception_handler(RequestValidationError)
     async def invalid(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -215,28 +197,11 @@ def create_app(settings: Settings | None = None, repository: Any | None = None, 
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no", REQUEST_ID_HEADER: request_id},
         )
 
-    async def ensure_transaction_access(txn_id: str, user: AuthenticatedUser) -> None:
-        if user.is_support_agent:
-            return
-        checker = getattr(repo, "can_access_transaction", None)
+    def repo_call(method: Any, *args: Any) -> Any:
         try:
-            allowed = bool(checker) and await asyncio.to_thread(checker, txn_id, user.user_id)
-        except Exception as exc:
-            raise DependencyUnavailable from exc
-        if not allowed:
-            raise AuthError(403, "FORBIDDEN", "You do not have access to this transaction.")
-
-    def scoped_repository_call(method: Any, *args: Any, owner_id: str | None = None) -> Any:
-        try:
-            if owner_id is None:
-                return method(*args)
-            return method(*args, owner_id=owner_id)
+            return method(*args)
         except (TransactionNotFound, ValueError):
             raise
-        except TypeError as exc:
-            if owner_id is not None:
-                raise AuthError(503, "OWNERSHIP_UNAVAILABLE", "Ownership checks are temporarily unavailable.") from exc
-            raise DependencyUnavailable from exc
         except Exception as exc:
             raise DependencyUnavailable from exc
 
@@ -248,55 +213,46 @@ def create_app(settings: Settings | None = None, repository: Any | None = None, 
                 "description": "JSON resolution by default; request with Accept: text/event-stream for progressive trace events.",
                 "content": {"text/event-stream": {"schema": {"type": "string"}}},
             },
-            401: {"model": ErrorResponse},
-            403: {"model": ErrorResponse},
             404: {"model": ErrorResponse},
             503: {"model": ErrorResponse},
         },
     )
-    async def resolve(payload: ResolveRequest, request: Request, _user: AuthenticatedUser = Depends(support_agent)) -> Any:
+    async def resolve(payload: ResolveRequest, request: Request) -> Any:
         request_id = request_id_for(request)
         if "text/event-stream" in request.headers.get("accept", "").lower():
             return await stream_resolution(payload, request, request_id)
-        row = await asyncio.to_thread(scoped_repository_call, repo.resolve, payload.txn_id, request_id)
+        row = await asyncio.to_thread(repo_call, repo.resolve, payload.txn_id, request_id)
         trace = TraceMetadata.model_validate({"request_id": request_id, "run_id": row["run_id"], "created_at": row["created_at"], "steps": row["steps"]})
         return ResolveResponse(txn_id=payload.txn_id, transaction_id=payload.txn_id, status=row["status"], explanation=row["explanation"], action=row["action"], trace=trace)
 
-    @app.get("/trace/{txn_id}", response_model=TraceMetadata, include_in_schema=False, responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}})
-    async def trace_alias(txn_id: str, user: AuthenticatedUser = Depends(current_user)) -> TraceMetadata:
-        await ensure_transaction_access(txn_id, user)
-        owner_id = None if user.is_support_agent else user.user_id
-        return TraceMetadata.model_validate(await asyncio.to_thread(scoped_repository_call, repo.trace, txn_id, owner_id=owner_id))
+    @app.get("/trace/{txn_id}", response_model=TraceMetadata, include_in_schema=False, responses={404: {"model": ErrorResponse}})
+    async def trace_alias(txn_id: str) -> TraceMetadata:
+        return TraceMetadata.model_validate(await asyncio.to_thread(repo_call, repo.trace, txn_id))
 
-    @app.get("/trace/{transaction_id}", response_model=TraceMetadata, include_in_schema=True, responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}, 404: {"model": ErrorResponse}})
-    async def trace(transaction_id: str, user: AuthenticatedUser = Depends(current_user)) -> TraceMetadata:
-        await ensure_transaction_access(transaction_id, user)
-        owner_id = None if user.is_support_agent else user.user_id
-        return TraceMetadata.model_validate(await asyncio.to_thread(scoped_repository_call, repo.trace, transaction_id, owner_id=owner_id))
+    @app.get("/trace/{transaction_id}", response_model=TraceMetadata, include_in_schema=True, responses={404: {"model": ErrorResponse}})
+    async def trace(transaction_id: str) -> TraceMetadata:
+        return TraceMetadata.model_validate(await asyncio.to_thread(repo_call, repo.trace, transaction_id))
 
-    @app.get("/tickets", response_model=list[TicketResponse], responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}})
-    async def tickets(action_taken: str | None = None, confidence: str | None = None, user: AuthenticatedUser = Depends(current_user)) -> list[TicketResponse]:
-        owner_id = None if user.is_support_agent else user.user_id
-        rows = await asyncio.to_thread(scoped_repository_call, repo.tickets, action_taken, confidence, owner_id=owner_id)
+    @app.get("/tickets", response_model=list[TicketResponse])
+    async def tickets(action_taken: str | None = None, confidence: str | None = None) -> list[TicketResponse]:
+        rows = await asyncio.to_thread(repo_call, repo.tickets, action_taken, confidence)
         return [TicketResponse.model_validate(row) for row in rows]
 
-    @app.get("/exceptions", response_model=list[TicketResponse], responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}})
-    async def exceptions(user: AuthenticatedUser = Depends(current_user)) -> list[TicketResponse]:
-        owner_id = None if user.is_support_agent else user.user_id
-        rows = await asyncio.to_thread(scoped_repository_call, repo.exceptions, owner_id=owner_id)
+    @app.get("/exceptions", response_model=list[TicketResponse])
+    async def exceptions() -> list[TicketResponse]:
+        rows = await asyncio.to_thread(repo_call, repo.exceptions)
         return [TicketResponse.model_validate(row) for row in rows]
 
-    @app.get("/analytics", response_model=AnalyticsResponse, responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}})
-    async def analytics(user: AuthenticatedUser = Depends(current_user)) -> AnalyticsResponse:
-        owner_id = None if user.is_support_agent else user.user_id
-        return AnalyticsResponse.model_validate(await asyncio.to_thread(scoped_repository_call, repo.analytics, owner_id=owner_id))
+    @app.get("/analytics", response_model=AnalyticsResponse)
+    async def analytics() -> AnalyticsResponse:
+        return AnalyticsResponse.model_validate(await asyncio.to_thread(repo_call, repo.analytics))
 
-    @app.post("/reconcile", response_model=ReconcileResponse, responses={401: {"model": ErrorResponse}, 403: {"model": ErrorResponse}})
-    async def reconcile(payload: ReconcileRequest, request: Request, _user: AuthenticatedUser = Depends(support_agent)) -> ReconcileResponse:
+    @app.post("/reconcile", response_model=ReconcileResponse)
+    async def reconcile(payload: ReconcileRequest, request: Request) -> ReconcileResponse:
         request_id = request_id_for(request)
         if payload.date_from > payload.date_to:
             return _error_response(request, status_code=422, code="INVALID_REQUEST", message="date_from must be before date_to", error_class=ERROR_CLASS_USER)  # type: ignore[return-value]
-        rows = await asyncio.to_thread(scoped_repository_call, repo.reconcile, payload.date_from, payload.date_to, request_id)
+        rows = await asyncio.to_thread(repo_call, repo.reconcile, payload.date_from, payload.date_to, request_id)
         return ReconcileResponse(date_from=payload.date_from, date_to=payload.date_to, results=[ResolveResponse(txn_id=row.get("txn_id", row.get("transaction_id")), transaction_id=row.get("txn_id", row.get("transaction_id")), status=row["status"], explanation=row["explanation"], action=row["action"], trace=TraceMetadata(request_id=request_id, run_id=row["run_id"], created_at=row["created_at"], steps=row["steps"])) for row in rows])
 
     # Last, deliberately: `add_middleware` inserts at the front of the stack, so
@@ -338,11 +294,6 @@ def _repository(settings: Settings) -> Any:
         similarity_threshold=settings.similarity_threshold,
         similarity_match_count=settings.similarity_match_count,
     )
-
-
-def _authenticator(repository: Any) -> SupabaseAuthenticator | None:
-    client = getattr(repository, "client", None)
-    return SupabaseAuthenticator(client) if client is not None else None
 
 
 app = create_app()

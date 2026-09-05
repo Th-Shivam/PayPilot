@@ -50,9 +50,6 @@ class Settings(BaseSettings):
     supabase_anon_key: SecretStr | None = None
     supabase_service_role_key: SecretStr | None = None
     logfire_token: SecretStr | None = None
-    # Fail closed by default. False is accepted only for explicit local
-    # development, where the API uses a fixed support-agent identity.
-    require_auth: bool = True
 
     def validate_for_runtime(self) -> None:
         """Require integrations before a production server can start.
@@ -61,9 +58,6 @@ class Settings(BaseSettings):
         validation error includes the original input mapping, which can expose
         secret constructor values in tracebacks.
         """
-
-        if not self.require_auth and self.app_env != "local":
-            raise ConfigurationError("REQUIRE_AUTH=false is only permitted with APP_ENV=local")
 
         if self.app_env != "production":
             return

@@ -30,7 +30,7 @@ from backend.observability import (
     log_warn,
     request_id_for,
 )
-from .schemas import AnalyticsResponse, ErrorResponse, ReconcileRequest, ReconcileResponse, ResolveRequest, ResolveResponse, TicketResponse, TraceMetadata
+from .schemas import AnalyticsResponse, ChatRequest, ChatResponse, ErrorResponse, ReconcileRequest, ReconcileResponse, ResolveRequest, ResolveResponse, TicketResponse, TraceMetadata
 
 
 class DependencyUnavailable(RuntimeError):
@@ -224,6 +224,17 @@ def create_app(settings: Settings | None = None, repository: Any | None = None) 
         row = await asyncio.to_thread(repo_call, repo.resolve, payload.txn_id, request_id)
         trace = TraceMetadata.model_validate({"request_id": request_id, "run_id": row["run_id"], "created_at": row["created_at"], "steps": row["steps"]})
         return ResolveResponse(txn_id=payload.txn_id, transaction_id=payload.txn_id, status=row["status"], explanation=row["explanation"], action=row["action"], trace=trace)
+
+    @app.post("/chat", response_model=ChatResponse, responses={503: {"model": ErrorResponse}})
+    async def chat(payload: ChatRequest) -> ChatResponse:
+        answer = await asyncio.to_thread(
+            repo_call,
+            repo.chat,
+            payload.message,
+            [item.model_dump() for item in payload.history],
+            payload.context,
+        )
+        return ChatResponse(answer=str(answer))
 
     @app.get("/trace/{txn_id}", response_model=TraceMetadata, include_in_schema=False, responses={404: {"model": ErrorResponse}})
     async def trace_alias(txn_id: str) -> TraceMetadata:

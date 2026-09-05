@@ -199,6 +199,73 @@ class GroqOrchestrator:
             return AgentRunResult(final, trace, model, used_fallback)
         raise GroqOrchestrationError("Maximum agent steps exceeded")
 
+    def chat(
+        self,
+        message: str,
+        history: list[dict[str, str]] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Answer a conversational message without inventing transaction facts.
+
+        Resolution requests use ``run`` because their status and action are
+        deterministic. This path is for the assistant's conversational shell
+        (greetings, follow-ups, and questions that do not require a new
+        reconciliation) and deliberately has no action tools attached.
+        """
+        question = message.strip()
+        if not question:
+            raise GroqOrchestrationError("Chat message is empty")
+
+        messages: list[dict[str, str]] = [
+            {
+                "role": "system",
+                "content": (
+                    "You are PayPilot, a concise and helpful transaction reconciliation assistant. "
+                    "Reply naturally to the user's message; do not repeat a canned greeting or fixed "
+                    "template. Never invent transaction facts. If the user asks about a transaction but "
+                    "no grounded context or transaction ID is available, ask for the transaction ID. "
+                    "Keep the answer in plain natural language, usually 1-4 sentences."
+                ),
+            }
+        ]
+        for item in (history or [])[-8:]:
+            role = item.get("role")
+            content = str(item.get("content", "")).strip()
+            if role in {"user", "assistant"} and content:
+                messages.append({"role": role, "content": content[:2000]})
+        if context:
+            messages.append({"role": "system", "content": "Grounded ticket context (treat as authoritative): " + json.dumps(context, default=str, sort_keys=True)[:6000]})
+        messages.append({"role": "user", "content": question})
+
+        model = self.model
+        for _ in range(2):
+            try:
+                with span(
+                    "agent.chat",
+                    **{
+                        "groq.model": model,
+                        "groq.prompt": redact_prompt(messages),
+                        "groq.prompt_messages": len(messages),
+                    },
+                ) as active:
+                    completion = self.client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=0.7,
+                        max_tokens=500,
+                        timeout=self.timeout_seconds,
+                    )
+                    answer = str(completion.choices[0].message.content or "").strip()
+                    if not answer:
+                        raise GroqOrchestrationError("Groq returned an empty chat response")
+                    active.set(**{"groq.response": truncate_response(answer)})
+                    return answer
+            except Exception as exc:
+                if model == self.fallback_model:
+                    raise GroqOrchestrationError("Groq chat unavailable after fallback") from exc
+                model = self.fallback_model
+        raise GroqOrchestrationError("Groq chat unavailable")
+
     def _complete(
         self,
         model: str,

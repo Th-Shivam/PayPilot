@@ -52,6 +52,15 @@ export interface ResolveResponse {
   trace: TraceMetadata
 }
 
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface ChatResponse {
+  answer: string
+}
+
 export class ApiClientError extends Error {
   readonly status: number
 
@@ -129,6 +138,14 @@ export function resolveTransaction(transactionId: string): Promise<ResolveRespon
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ txn_id: transactionId }),
+  })
+}
+
+export function askAgent(message: string, history: ChatMessage[] = [], context?: Record<string, unknown>): Promise<ChatResponse> {
+  return apiFetch<ChatResponse>('chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, history, context }),
   })
 }
 

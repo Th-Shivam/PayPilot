@@ -26,8 +26,11 @@ PayPilot is a transaction reconciliation assistant. The frontend is a React/Vite
 3. Copy the environment template and fill in credentials only for services you are using:
 
    ```bash
-   cp backend/.env.example .env
+   cp backend/.env.example backend/.env
    ```
+
+   The backend also accepts a repository-root `.env` when you prefer keeping one
+   local environment file for the project.
 
    Local development defaults to `APP_ENV=local`, so the backend can start without integration credentials. Set `APP_ENV=production` only when all Groq, Supabase, and Logfire variables are present.
 

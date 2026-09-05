@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     embedding_model: str = "all-MiniLM-L6-v2"
     similarity_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
     similarity_match_count: int = Field(default=3, ge=1, le=20)
+    # Reference instant the settlement window (T+2) is judged against. Leave
+    # unset in production so the current time is used. For a demo over the
+    # seeded fixtures (dated 2025-01-15), pin this to that date so every
+    # diagnosis path — especially `pending` — classifies as generated instead
+    # of drifting to `anomaly` as real time moves past the seeded window.
+    reconciliation_reference_date: str | None = None
     supabase_url: str | None = None
     supabase_anon_key: SecretStr | None = None
     supabase_service_role_key: SecretStr | None = None

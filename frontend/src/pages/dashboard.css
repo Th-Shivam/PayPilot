@@ -976,11 +976,14 @@
   pointer-events: auto;
 }
 
-.agent-drawer-backdrop {
+.dashboard-main .agent-drawer-backdrop {
   position: absolute;
   inset: 0;
-  border: 0;
-  background: rgba(0, 0, 0, 0.58);
+  min-height: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: rgba(0, 0, 0, 0.58) !important;
+  color: transparent !important;
   cursor: pointer;
   opacity: 0;
   transition: opacity 220ms ease;
@@ -1350,11 +1353,14 @@
   justify-content: flex-end;
 }
 
-.detail-backdrop {
+.dashboard-main .detail-backdrop {
   position: absolute;
   inset: 0;
-  border: 0;
-  background: rgba(0, 0, 0, 0.64);
+  min-height: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: rgba(0, 0, 0, 0.64) !important;
+  color: transparent !important;
 }
 
 .ticket-detail {

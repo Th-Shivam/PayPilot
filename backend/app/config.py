@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
     frontend_origin: str = "http://localhost:5173"
+    # Comma-separated list of browser origins that may call the API.
+    # In production on Render, set ALLOWED_ORIGINS to your Vercel frontend URL,
+    # e.g.  ALLOWED_ORIGINS=https://your-app.vercel.app
+    # Multiple origins can be separated by commas:
+    #   ALLOWED_ORIGINS=https://your-app.vercel.app,https://your-custom-domain.com
     # Vite may be opened through either hostname during local development.
     # Keep both origins allowed so the browser can reach the live API without
     # requiring a manual env change.

@@ -1,11 +1,12 @@
 const DEPLOYED_API_BASE_URL = 'https://paypilot-ki2b.onrender.com'
 
 // Use the deployed API by default in every environment. Local development can
-// still opt into a local backend through VITE_API_BASE_URL in .env.local.
+// still opt into a local backend by creating frontend/.env.local with:
+//   VITE_API_BASE_URL=http://127.0.0.1:8000
 const DEFAULT_API_BASE_URL = DEPLOYED_API_BASE_URL
 
 export const API_BASE_URL = (
-  import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || DEFAULT_API_BASE_URL
 ).replace(/\/+$/, '')
 
 export type TraceEventType =

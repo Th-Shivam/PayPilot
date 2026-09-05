@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Self
+from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.domain.trace import TraceEvent
@@ -96,3 +96,23 @@ class ReconcileResponse(BaseModel):
     date_from: date
     date_to: date
     results: list[ResolveResponse]
+
+
+# `from __future__ import annotations` defers annotation evaluation, so these
+# models can be left "not fully defined" until something first touches them.
+# FastAPI then fails to build response schemas for endpoints like /tickets and
+# /openapi.json depending on import/test ordering. Rebuilding here makes every
+# model resolved at import time, so behaviour is deterministic.
+for _model in (
+    ResolveRequest,
+    TraceStep,
+    TraceMetadata,
+    ResolveResponse,
+    ErrorBody,
+    ErrorResponse,
+    TicketResponse,
+    AnalyticsResponse,
+    ReconcileRequest,
+    ReconcileResponse,
+):
+    _model.model_rebuild()

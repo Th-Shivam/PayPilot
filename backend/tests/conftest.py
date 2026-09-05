@@ -197,7 +197,7 @@ def repo(seeded_tables: dict[str, list[dict[str, Any]]]) -> SupabaseRepository:
 
 @pytest.fixture
 def client(repo: SupabaseRepository) -> TestClient:
-    return TestClient(create_app(Settings(require_auth=False), repo))
+    return TestClient(create_app(Settings(), repo))
 
 
 @pytest.fixture
@@ -211,6 +211,6 @@ def make_client(seeded_tables: dict[str, list[dict[str, Any]]]):
             orchestrator=orchestrator,
             embedding_service=_embedding_service(),
         )
-        return TestClient(create_app(Settings(require_auth=False), built)), built
+        return TestClient(create_app(Settings(), built)), built
 
     return _build

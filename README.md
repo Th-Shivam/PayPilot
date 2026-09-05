@@ -51,6 +51,8 @@ npm run dev
 
 The frontend uses `http://127.0.0.1:8000` by default. To point it at another backend, set `VITE_API_BASE_URL` in `frontend/.env.local` and restart Vite.
 
+Production frontend builds use the deployed API at `https://paypilot-ki2b.onrender.com` by default. Set `VITE_API_BASE_URL` in the frontend hosting provider when using a different backend URL. The backend's `ALLOWED_ORIGINS` must include the final frontend origin (without a trailing slash) for browser requests to succeed.
+
 Frontend checks run from the frontend directory:
 
 ```bash

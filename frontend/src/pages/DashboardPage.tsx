@@ -9,7 +9,6 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  CircleAlert,
   CircleDashed,
   Clock3,
   Database,
@@ -33,6 +32,7 @@ import { Sidebar, SidebarBody, SidebarLink, useSidebar } from '../components/ui/
 import { PayPilotMark } from '../components/PayPilotMark'
 import {
   ApiClientError,
+  askAgent,
   getAnalytics,
   getTickets,
   getTrace,
@@ -81,17 +81,6 @@ const CHART_STATUSES: TicketViewStatus[] = ['Open', 'Investigating', 'Resolved',
 const PAYPILOT_SCENE = 'https://prod.spline.design/33yYGDJAvjqUzUiE/scene.splinecode'
 const PAYPILOT_SCENE_DURATION_MS = 10000
 
-const DEMO_TICKETS: TicketRecord[] = [
-  { ticket_id: 'TKT-1023', txn_id: 'TXN_10872', diagnosis: 'anomaly', explanation: 'Gateway captured the payment but the bank has no settlement record past the expected window.', action_taken: 'escalated', confidence: 'low_flagged_for_review', reason_code: 'BANK_NO_RECORD_PAST_SETTLEMENT_WINDOW', owner_id: 'A. Morgan', created_at: '2026-09-05T07:32:00Z', updated_at: '2026-09-05T08:06:00Z' },
-  { ticket_id: 'TKT-1022', txn_id: 'TXN_10861', diagnosis: 'ledger_gap', explanation: 'Settlement exists but the ledger entry is missing.', action_taken: 'ledger_entry_created', confidence: 'high', reason_code: 'LEDGER_ENTRY_ABSENT_DESPITE_SETTLEMENT', owner_id: 'R. Shah', created_at: '2026-09-05T06:48:00Z', updated_at: '2026-09-05T07:02:00Z' },
-  { ticket_id: 'TKT-1021', txn_id: 'TXN_10854', diagnosis: 'pending', explanation: 'Settlement is still inside the expected window.', action_taken: 'no_action_needed', confidence: 'high', reason_code: 'BANK_PENDING_WITHIN_SETTLEMENT_WINDOW', owner_id: 'M. Rao', created_at: '2026-09-05T05:54:00Z', updated_at: '2026-09-05T06:10:00Z' },
-  { ticket_id: 'TKT-1020', txn_id: 'TXN_10842', diagnosis: 'clean', explanation: 'Gateway, bank, and ledger records match.', action_taken: 'auto_resolved', confidence: 'high', reason_code: 'ALL_SOURCES_AGREE', owner_id: 'A. Morgan', created_at: '2026-09-05T04:31:00Z', updated_at: '2026-09-05T04:35:00Z', resolved_at: '2026-09-05T04:35:00Z' },
-  { ticket_id: 'TKT-1019', txn_id: 'TXN_10828', diagnosis: 'amount_mismatch', explanation: 'The gateway and bank report different amounts for the same transaction.', action_taken: 'escalated', confidence: 'high', reason_code: 'AMOUNT_DISAGREEMENT_ACROSS_SOURCES', owner_id: 'S. Iyer', created_at: '2026-09-05T03:18:00Z', updated_at: '2026-09-05T03:59:00Z' },
-  { ticket_id: 'TKT-1018', txn_id: 'TXN_10817', diagnosis: 'clean', explanation: 'Gateway, bank, and ledger records match.', action_taken: 'no_action_needed', confidence: 'high', reason_code: 'ALL_SOURCES_AGREE', owner_id: 'R. Shah', created_at: '2026-09-05T02:42:00Z', updated_at: '2026-09-05T02:47:00Z', resolved_at: '2026-09-05T02:47:00Z' },
-  { ticket_id: 'TKT-1017', txn_id: 'TXN_10796', diagnosis: 'pending', explanation: 'Settlement is still inside the expected window.', action_taken: 'no_action_needed', confidence: 'high', reason_code: 'BANK_PENDING_WITHIN_SETTLEMENT_WINDOW', owner_id: 'M. Rao', created_at: '2026-09-05T01:25:00Z', updated_at: '2026-09-05T01:26:00Z' },
-  { ticket_id: 'TKT-1016', txn_id: 'TXN_10784', diagnosis: 'anomaly', explanation: 'Gateway captured the payment but the bank has no settlement record.', action_taken: 'escalated', confidence: 'low_flagged_for_review', reason_code: 'BANK_NO_RECORD_PAST_SETTLEMENT_WINDOW', owner_id: 'Unassigned', created_at: '2026-09-04T23:17:00Z', updated_at: '2026-09-05T00:02:00Z' },
-]
-
 function ticketId(ticket: TicketRecord): string {
   if (ticket.ticket_id) return ticket.ticket_id
   const transaction = ticket.txn_id || ticket.transaction_id || 'UNKNOWN'
@@ -100,6 +89,18 @@ function ticketId(ticket: TicketRecord): string {
 
 function transactionId(ticket: TicketRecord): string {
   return ticket.txn_id || ticket.transaction_id || 'Unknown transaction'
+}
+
+function transactionIdFromMessage(message: string): string | null {
+  // Live fixture IDs are both delimiter-free (TXNCLEAN001) and delimited
+  // (TXN_CLEAN001/TXN-CLEAN001). Keep the compact form bounded at whitespace
+  // so words such as "status" are never sent as part of the database key.
+  const compact = message.match(/\bTXN[_-]?[A-Z0-9]+\b/i)
+  if (compact) return compact[0].toUpperCase()
+
+  // Also accept the readable form "TXN CLEAN 001" used in chat messages.
+  const spaced = message.match(/\bTXN\s+([A-Z]+)\s+(\d+)\b/i)
+  return spaced ? `TXN${spaced[1]}${spaced[2]}`.toUpperCase() : null
 }
 
 function diagnosis(ticket: TicketRecord): string {
@@ -146,16 +147,13 @@ function evidenceCounts(items: EvidenceItem[]): string {
   return `${items.length} sources checked · ${verified} verified · ${missing} missing`
 }
 
-function DemoBanner({ message, onDismiss }: { message: string; onDismiss: () => void }): ReactElement {
-  return <div className="console-banner"><CircleAlert size={15} /><span>{message}</span><button type="button" onClick={onDismiss} aria-label="Dismiss notification" title="Dismiss notification"><X size={14} /></button></div>
-}
-
 function LoadingConsole(): ReactElement {
   return <div className="console-loading"><div className="loading-line loading-line-heading" /><div className="loading-stats"><span /><span /><span /><span /></div><div className="loading-panels"><span /><span /></div><div className="loading-table" /></div>
 }
 
 function BlockedConsole({ permissionDenied, message, onRetry }: { permissionDenied: boolean; message: string; onRetry: () => void }): ReactElement {
-  return <div className="blocked-console"><ShieldCheck size={22} /><p className="eyebrow">{permissionDenied ? 'Permission denied' : 'Read unavailable'}</p><h2>{permissionDenied ? 'This workspace is not available to your role.' : 'The operations feed could not be read.'}</h2><p>{permissionDenied ? 'Ask a workspace owner for access to tickets and investigation traces.' : message}</p>{!permissionDenied && <button type="button" className="console-button" onClick={onRetry}><RefreshCw size={14} /> Retry</button>}</div>
+  const restricted = permissionDenied && message === 'Permission denied.'
+  return <div className="blocked-console"><ShieldCheck size={22} /><p className="eyebrow">{restricted ? 'Permission denied' : 'Read unavailable'}</p><h2>{restricted ? 'This workspace is not available to your role.' : 'The operations feed could not be read.'}</h2><p>{restricted ? 'Ask a workspace owner for access to tickets and investigation traces.' : message}</p>{!restricted && <button type="button" className="console-button" onClick={onRetry}><RefreshCw size={14} /> Retry</button>}</div>
 }
 
 function StatusBadge({ status }: { status: TicketViewStatus }): ReactElement {
@@ -226,19 +224,42 @@ function AgentPanel({ tickets, selectedTicket, onOpenTicket, onClose }: { ticket
     setScenePlaying(true)
     if (sceneTimer.current !== null) window.clearTimeout(sceneTimer.current)
     sceneTimer.current = window.setTimeout(() => setScenePlaying(false), PAYPILOT_SCENE_DURATION_MS)
+    const history = messages
+      .filter((message) => message.id !== 'welcome')
+      .slice(-8)
+      .map((message) => ({ role: message.role === 'agent' ? 'assistant' as const : 'user' as const, content: message.text }))
     const match = tickets.find((ticket) => text.toLowerCase().includes(ticketId(ticket).toLowerCase()) || text.toLowerCase().includes(transactionId(ticket).toLowerCase()))
     let responseTicket = match
     let resolvedText = ''
-    const transactionMatch = text.match(/TXN[_-][A-Z0-9]+/i)
-    if (!responseTicket && transactionMatch) {
+    let lookupError = ''
+    const transactionMatch = transactionIdFromMessage(text)
+    if (responseTicket) {
       try {
-        const response = await resolveTransaction(transactionMatch[0])
-        responseTicket = { txn_id: transactionMatch[0], diagnosis: response.status, explanation: response.explanation, action_taken: response.action, confidence: 'high' }
+        const response = await askAgent(text, history, responseTicket as unknown as Record<string, unknown>)
+        resolvedText = response.answer
+      } catch {
+        // The ticket row is still real data, so keep its stored explanation as
+        // a deterministic fallback if the conversational model is unavailable.
+        resolvedText = responseTicket.explanation
+      }
+    } else if (transactionMatch) {
+      try {
+        const response = await resolveTransaction(transactionMatch)
+        responseTicket = { txn_id: transactionMatch, diagnosis: response.status, explanation: response.explanation, action_taken: response.action, confidence: 'high' }
         resolvedText = response.explanation
-      } catch { resolvedText = 'I could not retrieve a grounded record for that transaction.' }
+      } catch (error) {
+        lookupError = error instanceof Error ? error.message : 'I could not retrieve a grounded record for that transaction.'
+      }
+    } else {
+      try {
+        const response = await askAgent(text, history)
+        resolvedText = response.answer
+      } catch (error) {
+        lookupError = error instanceof Error ? error.message : 'The conversational model is unavailable right now.'
+      }
     }
     await new Promise((resolve) => window.setTimeout(resolve, 280))
-    if (!responseTicket) setMessages((current) => [...current, { id: `agent-${Date.now()}`, role: 'agent', text: 'Give me a ticket ID or transaction ID from the register. I will only answer from the linked gateway, bank and ledger evidence.' }])
+    if (!responseTicket) setMessages((current) => [...current, { id: `agent-${Date.now()}`, role: 'agent', text: resolvedText || lookupError || 'Give me a ticket ID or transaction ID from the register. I will only answer from the linked gateway, bank and ledger evidence.' }])
     else {
       const evidence = evidenceForTicket(responseTicket)
       setMessages((current) => [...current, { id: `agent-${Date.now()}`, role: 'agent', text: `I traced ${transactionId(responseTicket)} across the gateway, bank and ledger records. ${resolvedText || responseTicket.explanation || 'The available records do not include a resolution explanation.'}`, evidence }])
@@ -263,7 +284,6 @@ export function DashboardPage(): ReactElement {
   const [loading, setLoading] = useState(true)
   const [permissionDenied, setPermissionDenied] = useState(false)
   const [apiError, setApiError] = useState('')
-  const [demoMode, setDemoMode] = useState(false)
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | TicketViewStatus>('all')
   const [page, setPage] = useState(1)
@@ -281,20 +301,14 @@ export function DashboardPage(): ReactElement {
       const [ticketResponse, analyticsResponse] = await Promise.all([getTickets(), getAnalytics()])
       setTickets(ticketResponse)
       setAnalytics(analyticsResponse)
-      setDemoMode(false)
     } catch (error) {
       const denied = error instanceof ApiClientError && (error.status === 401 || error.status === 403)
-      setPermissionDenied(denied)
-      if (!denied) {
-        setTickets(DEMO_TICKETS)
-        setAnalytics(null)
-        setDemoMode(true)
-        setApiError(error instanceof Error ? error.message : 'Live reads are unavailable.')
-      } else {
-        setTickets([])
-        setAnalytics(null)
-        setApiError(error instanceof Error ? error.message : 'Permission denied.')
-      }
+      // Keep the dashboard in a blocked state for every live-read failure.
+      // A failed API call must never be replaced with fabricated ticket data.
+      setPermissionDenied(true)
+      setTickets([])
+      setAnalytics(null)
+      setApiError(error instanceof Error ? error.message : denied ? 'Permission denied.' : 'Live reads are unavailable.')
     } finally { setLoading(false) }
   }, [])
 
@@ -362,5 +376,5 @@ export function DashboardPage(): ReactElement {
   }
   const viewTitle: Record<DashboardView, string> = { overview: 'Operations overview', tickets: 'Ticket register', investigations: 'Latest investigations', exceptions: 'Exception queue', transactions: 'Transaction register', reports: 'Operations reports' }
 
-  return <div className="dashboard-viewport"><div className="dashboard-frame"><Sidebar open={sidebarOpen} setOpen={setSidebarOpen}><div className="dashboard-app"><SidebarBody className="reference-sidebar-body"><SidebarContents role={role} activeView={activeView} exceptionCount={exceptionCount} onRoleChange={handleRoleChange} onNavigate={(view) => { setActiveView(view); setPage(1) }} /></SidebarBody><main className="dashboard-main"><header className="dashboard-topbar"><div><span className="topbar-kicker">PayPilot / Workspace</span><h1>{viewTitle[activeView]}</h1></div><div className="topbar-actions"><span className="topbar-read"><span /> Supabase read</span><button type="button" className="topbar-refresh" aria-label="Refresh dashboard" title="Refresh dashboard" onClick={() => void loadData()}><RefreshCw size={15} /></button><span className="topbar-avatar">AM</span></div></header><div className="dashboard-content">{loading ? <LoadingConsole /> : permissionDenied ? <BlockedConsole permissionDenied message={apiError} onRetry={() => void loadData()} /> : <><div className="workspace-heading"><div><span className="eyebrow">{role === 'support-agent' ? 'Support operations' : 'Business pulse'}</span><div className="workspace-title-row"><h2>{role === 'support-agent' ? 'Keep the queue moving.' : 'Know where money is stuck.'}</h2><AgentHeroButton onClick={() => setAgentOpen(true)} /></div><p>{role === 'support-agent' ? 'Every ticket stays tied to the records that produced it.' : 'A concise view of reconciliation health across the workspace.'}</p></div><div className="workspace-date"><span className="live-dot" /> Live view <span>05 Sep 2026</span></div></div>{demoMode && <DemoBanner message="Live reads are unavailable. Showing a local evidence-safe preview until the API reconnects." onDismiss={() => setDemoMode(false)} />}<div className="dashboard-columns"><section className="operations-panel"><div className="section-head"><div><span className="eyebrow">Operations / analytics</span><h3>{activeView === 'overview' ? 'At a glance' : viewTitle[activeView]}</h3></div><span className="section-meta">{totalTickets} tickets · {reportedOutcomes} reported outcomes</span></div><div className="compact-stats"><div><span>Open</span><strong>{openTickets}</strong><small>Needs a next action</small></div><div><span>Resolved</span><strong>{resolvedTickets}</strong><small>Closed with evidence</small></div><div><span>Investigating</span><strong>{statusCounts.Investigating}</strong><small>Still within the window</small></div><div><span>Needs review</span><strong>{statusCounts['Needs Review']}</strong><small>Human attention</small></div></div><div className="analytics-row"><div className="subpanel chart-subpanel"><div className="subpanel-head"><div><span className="eyebrow">Resolution breakdown</span><h4>Ticket status</h4></div><BarChart3 size={15} /></div><div className="bar-chart"><ResponsiveContainer width="100%" height={146}><BarChart data={chartData} margin={{ top: 14, right: 10, left: -12, bottom: 0 }}><XAxis dataKey="name" tick={{ fill: '#8a8a8a', fontSize: 10 }} axisLine={false} tickLine={false} /><YAxis allowDecimals={false} tick={{ fill: '#666', fontSize: 10 }} axisLine={false} tickLine={false} /><Tooltip cursor={{ fill: 'rgba(255,255,255,0.03)' }} contentStyle={{ background: '#242424', border: '1px solid #3f3f3f', borderRadius: 4, color: '#e9e9e9', fontSize: 11 }} /><Bar dataKey="count" isAnimationActive={false} radius={[2, 2, 0, 0]}>{chartData.map((entry) => <Cell key={entry.name} fill={STATUS_COLORS[entry.name]} />)}</Bar></BarChart></ResponsiveContainer></div></div><div className="subpanel distribution-subpanel"><div className="subpanel-head"><div><span className="eyebrow">Open vs resolved</span><h4>Queue health</h4></div><ListFilter size={15} /></div><div className="queue-health"><div className="queue-donut"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={[{ name: 'Open', value: openTickets }, { name: 'Resolved', value: resolvedTickets }]} dataKey="value" isAnimationActive={false} innerRadius={32} outerRadius={50} paddingAngle={2} stroke="none">{[openTickets, resolvedTickets].map((_, index) => <Cell key={index} fill={index === 0 ? '#c77662' : '#6da989'} />)}</Pie></PieChart></ResponsiveContainer><div><strong>{totalTickets ? Math.round((resolvedTickets / totalTickets) * 100) : 0}%</strong><span>resolved</span></div></div><div className="queue-legend"><div><span className="legend-dot legend-dot-open" /> Open <strong>{openTickets}</strong></div><div><span className="legend-dot legend-dot-resolved" /> Resolved <strong>{resolvedTickets}</strong></div><div><span className="legend-dot legend-dot-review" /> Review <strong>{exceptionCount}</strong></div></div></div></div></div><div className="subpanel ticket-register"><div className="register-head"><div><span className="eyebrow">{activeView === 'overview' ? 'Latest investigations' : 'Operational register'}</span><h4>{activeView === 'overview' ? 'Recent tickets' : 'Tickets'}</h4></div><div className="register-actions"><label className="search-box"><Search size={14} /><span className="sr-only">Search tickets</span><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1) }} placeholder="Search ID" /></label><label className="filter-select"><span className="sr-only">Filter status</span><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as 'all' | TicketViewStatus); setPage(1) }}>{STATUS_OPTIONS.map((status) => <option value={status} key={status}>{status === 'all' ? 'All statuses' : status}</option>)}</select><ChevronDown size={12} /></label></div></div><TicketTable tickets={activeView === 'overview' ? latestInvestigations : pageTickets} onOpen={(ticket) => void handleOpenTicket(ticket)} compact={activeView === 'overview'} /><div className="table-footer"><span>{activeView === 'overview' ? `${latestInvestigations.length} latest records` : `${filteredTickets.length === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1}-${Math.min(safePage * PAGE_SIZE, filteredTickets.length)} of ${filteredTickets.length}`}</span>{activeView !== 'overview' && <div><button type="button" className="table-page-button" aria-label="Previous page" title="Previous page" disabled={safePage <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={14} /></button><span>{safePage} / {pageCount}</span><button type="button" className="table-page-button" aria-label="Next page" title="Next page" disabled={safePage >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))}><ChevronRight size={14} /></button></div>}</div></div></section></div></>}</div><div className={`agent-drawer-layer${agentOpen ? ' agent-drawer-layer-open' : ''}`} aria-hidden={!agentOpen}><button type="button" className="agent-drawer-backdrop" aria-label="Close PayPilot Agent" onClick={() => setAgentOpen(false)} /><aside className="agent-drawer" aria-label="PayPilot Agent"><AgentPanel tickets={tickets} selectedTicket={selectedTicket} onOpenTicket={(ticket) => void handleOpenTicket(ticket)} onClose={() => setAgentOpen(false)} /></aside></div></main></div></Sidebar></div>{selectedTicket && <TicketDetail ticket={selectedTicket} trace={trace} traceLoading={traceLoading} traceError={traceError} onClose={() => setSelectedTicket(null)} />}</div>
+  return <div className="dashboard-viewport"><div className="dashboard-frame"><Sidebar open={sidebarOpen} setOpen={setSidebarOpen}><div className="dashboard-app"><SidebarBody className="reference-sidebar-body"><SidebarContents role={role} activeView={activeView} exceptionCount={exceptionCount} onRoleChange={handleRoleChange} onNavigate={(view) => { setActiveView(view); setPage(1) }} /></SidebarBody><main className="dashboard-main"><header className="dashboard-topbar"><div><span className="topbar-kicker">PayPilot / Workspace</span><h1>{viewTitle[activeView]}</h1></div><div className="topbar-actions"><span className="topbar-read"><span /> Supabase read</span><button type="button" className="topbar-refresh" aria-label="Refresh dashboard" title="Refresh dashboard" onClick={() => void loadData()}><RefreshCw size={15} /></button><span className="topbar-avatar">AM</span></div></header><div className="dashboard-content">{loading ? <LoadingConsole /> : permissionDenied ? <BlockedConsole permissionDenied message={apiError} onRetry={() => void loadData()} /> : <><div className="workspace-heading"><div><span className="eyebrow">{role === 'support-agent' ? 'Support operations' : 'Business pulse'}</span><div className="workspace-title-row"><h2>{role === 'support-agent' ? 'Keep the queue moving.' : 'Know where money is stuck.'}</h2><AgentHeroButton onClick={() => setAgentOpen(true)} /></div><p>{role === 'support-agent' ? 'Every ticket stays tied to the records that produced it.' : 'A concise view of reconciliation health across the workspace.'}</p></div><div className="workspace-date"><span className="live-dot" /> Live view <span>05 Sep 2026</span></div></div><div className="dashboard-columns"><section className="operations-panel"><div className="section-head"><div><span className="eyebrow">Operations / analytics</span><h3>{activeView === 'overview' ? 'At a glance' : viewTitle[activeView]}</h3></div><span className="section-meta">{totalTickets} tickets · {reportedOutcomes} reported outcomes</span></div><div className="compact-stats"><div><span>Open</span><strong>{openTickets}</strong><small>Needs a next action</small></div><div><span>Resolved</span><strong>{resolvedTickets}</strong><small>Closed with evidence</small></div><div><span>Investigating</span><strong>{statusCounts.Investigating}</strong><small>Still within the window</small></div><div><span>Needs review</span><strong>{statusCounts['Needs Review']}</strong><small>Human attention</small></div></div><div className="analytics-row"><div className="subpanel chart-subpanel"><div className="subpanel-head"><div><span className="eyebrow">Resolution breakdown</span><h4>Ticket status</h4></div><BarChart3 size={15} /></div><div className="bar-chart"><ResponsiveContainer width="100%" height={146}><BarChart data={chartData} margin={{ top: 14, right: 10, left: -12, bottom: 0 }}><XAxis dataKey="name" tick={{ fill: '#8a8a8a', fontSize: 10 }} axisLine={false} tickLine={false} /><YAxis allowDecimals={false} tick={{ fill: '#666', fontSize: 10 }} axisLine={false} tickLine={false} /><Tooltip cursor={{ fill: 'rgba(255,255,255,0.03)' }} contentStyle={{ background: '#242424', border: '1px solid #3f3f3f', borderRadius: 4, color: '#e9e9e9', fontSize: 11 }} /><Bar dataKey="count" isAnimationActive={false} radius={[2, 2, 0, 0]}>{chartData.map((entry) => <Cell key={entry.name} fill={STATUS_COLORS[entry.name]} />)}</Bar></BarChart></ResponsiveContainer></div></div><div className="subpanel distribution-subpanel"><div className="subpanel-head"><div><span className="eyebrow">Open vs resolved</span><h4>Queue health</h4></div><ListFilter size={15} /></div><div className="queue-health"><div className="queue-donut"><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={[{ name: 'Open', value: openTickets }, { name: 'Resolved', value: resolvedTickets }]} dataKey="value" isAnimationActive={false} innerRadius={32} outerRadius={50} paddingAngle={2} stroke="none">{[openTickets, resolvedTickets].map((_, index) => <Cell key={index} fill={index === 0 ? '#c77662' : '#6da989'} />)}</Pie></PieChart></ResponsiveContainer><div><strong>{totalTickets ? Math.round((resolvedTickets / totalTickets) * 100) : 0}%</strong><span>resolved</span></div></div><div className="queue-legend"><div><span className="legend-dot legend-dot-open" /> Open <strong>{openTickets}</strong></div><div><span className="legend-dot legend-dot-resolved" /> Resolved <strong>{resolvedTickets}</strong></div><div><span className="legend-dot legend-dot-review" /> Review <strong>{exceptionCount}</strong></div></div></div></div></div><div className="subpanel ticket-register"><div className="register-head"><div><span className="eyebrow">{activeView === 'overview' ? 'Latest investigations' : 'Operational register'}</span><h4>{activeView === 'overview' ? 'Recent tickets' : 'Tickets'}</h4></div><div className="register-actions"><label className="search-box"><Search size={14} /><span className="sr-only">Search tickets</span><input value={query} onChange={(event) => { setQuery(event.target.value); setPage(1) }} placeholder="Search ID" /></label><label className="filter-select"><span className="sr-only">Filter status</span><select value={statusFilter} onChange={(event) => { setStatusFilter(event.target.value as 'all' | TicketViewStatus); setPage(1) }}>{STATUS_OPTIONS.map((status) => <option value={status} key={status}>{status === 'all' ? 'All statuses' : status}</option>)}</select><ChevronDown size={12} /></label></div></div><TicketTable tickets={activeView === 'overview' ? latestInvestigations : pageTickets} onOpen={(ticket) => void handleOpenTicket(ticket)} compact={activeView === 'overview'} /><div className="table-footer"><span>{activeView === 'overview' ? `${latestInvestigations.length} latest records` : `${filteredTickets.length === 0 ? 0 : (safePage - 1) * PAGE_SIZE + 1}-${Math.min(safePage * PAGE_SIZE, filteredTickets.length)} of ${filteredTickets.length}`}</span>{activeView !== 'overview' && <div><button type="button" className="table-page-button" aria-label="Previous page" title="Previous page" disabled={safePage <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={14} /></button><span>{safePage} / {pageCount}</span><button type="button" className="table-page-button" aria-label="Next page" title="Next page" disabled={safePage >= pageCount} onClick={() => setPage((current) => Math.min(pageCount, current + 1))}><ChevronRight size={14} /></button></div>}</div></div></section></div></>}</div><div className={`agent-drawer-layer${agentOpen ? ' agent-drawer-layer-open' : ''}`} aria-hidden={!agentOpen}><button type="button" className="agent-drawer-backdrop" aria-label="Close PayPilot Agent" onClick={() => setAgentOpen(false)} /><aside className="agent-drawer" aria-label="PayPilot Agent"><AgentPanel tickets={tickets} selectedTicket={selectedTicket} onOpenTicket={(ticket) => void handleOpenTicket(ticket)} onClose={() => setAgentOpen(false)} /></aside></div></main></div></Sidebar></div>{selectedTicket && <TicketDetail ticket={selectedTicket} trace={trace} traceLoading={traceLoading} traceError={traceError} onClose={() => setSelectedTicket(null)} />}</div>
 }

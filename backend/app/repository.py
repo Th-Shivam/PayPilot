@@ -326,6 +326,28 @@ class SupabaseRepository:
             )
             return result
 
+    def chat(
+        self,
+        message: str,
+        history: list[dict[str, str]] | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> str:
+        """Delegate conversational replies to the configured Groq agent."""
+        if self.orchestrator is None:
+            raise RuntimeError("Groq is not configured")
+        grounded_context = None
+        if context:
+            txn_id = context.get("txn_id") or context.get("transaction_id")
+            if txn_id:
+                # Never trust a context object supplied by the browser. Resolve
+                # the referenced ticket again through the service-role query and
+                # give the model only the live row.
+                grounded_context = self._one("tickets", str(txn_id))
+        try:
+            return self.orchestrator.chat(message, history=history, context=grounded_context)
+        except GroqOrchestrationError as exc:
+            raise RuntimeError("Groq chat unavailable") from exc
+
     def _resolve(
         self,
         txn_id: str,

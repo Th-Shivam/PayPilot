@@ -19,7 +19,10 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=(".env", ".env.local"),
+        # The documented command runs from the repository root, while local
+        # credentials are commonly kept in backend/.env. Load both locations;
+        # process environment variables still take precedence over either file.
+        env_file=(".env", ".env.local", "backend/.env", "backend/.env.local"),
         env_prefix="",
         case_sensitive=False,
         extra="ignore",
@@ -30,7 +33,10 @@ class Settings(BaseSettings):
     api_host: str = "127.0.0.1"
     api_port: int = Field(default=8000, ge=1, le=65535)
     frontend_origin: str = "http://localhost:5173"
-    allowed_origins: str = "http://localhost:5173"
+    # Vite may be opened through either hostname during local development.
+    # Keep both origins allowed so the browser can reach the live API without
+    # requiring a manual env change.
+    allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     groq_api_key: SecretStr | None = None
     groq_model: str = "openai/gpt-oss-120b"

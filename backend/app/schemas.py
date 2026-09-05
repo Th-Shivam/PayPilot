@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Self
+from typing import Any, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.domain.trace import TraceEvent
@@ -40,6 +40,21 @@ class ResolveResponse(BaseModel):
     explanation: str
     action: str
     trace: TraceMetadata
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    history: list[ChatMessage] = Field(default_factory=list, max_length=12)
+    context: dict[str, Any] | None = None
+
+
+class ChatResponse(BaseModel):
+    answer: str
 
 
 class ErrorBody(BaseModel):
@@ -108,6 +123,9 @@ for _model in (
     TraceStep,
     TraceMetadata,
     ResolveResponse,
+    ChatMessage,
+    ChatRequest,
+    ChatResponse,
     ErrorBody,
     ErrorResponse,
     TicketResponse,

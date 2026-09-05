@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
+import Spline from '@splinetool/react-spline'
 import {
   AlertTriangle,
   ArrowRight,
@@ -77,6 +78,8 @@ const STATUS_COLORS: Record<TicketViewStatus, string> = {
 
 const STATUS_OPTIONS: Array<'all' | TicketViewStatus> = ['all', 'Open', 'Investigating', 'Resolved', 'Needs Review']
 const CHART_STATUSES: TicketViewStatus[] = ['Open', 'Investigating', 'Resolved', 'Needs Review']
+const PAYPILOT_SCENE = 'https://prod.spline.design/33yYGDJAvjqUzUiE/scene.splinecode'
+const PAYPILOT_SCENE_DURATION_MS = 10000
 
 const DEMO_TICKETS: TicketRecord[] = [
   { ticket_id: 'TKT-1023', txn_id: 'TXN_10872', diagnosis: 'anomaly', explanation: 'Gateway captured the payment but the bank has no settlement record past the expected window.', action_taken: 'escalated', confidence: 'low_flagged_for_review', reason_code: 'BANK_NO_RECORD_PAST_SETTLEMENT_WINDOW', owner_id: 'A. Morgan', created_at: '2026-09-05T07:32:00Z', updated_at: '2026-09-05T08:06:00Z' },
@@ -196,6 +199,13 @@ function AgentPanel({ tickets, selectedTicket, onOpenTicket, onClose }: { ticket
   const [messages, setMessages] = useState<AgentMessage[]>([{ id: 'welcome', role: 'agent', text: 'I trace gateway, bank and ledger records before answering. Ask me about a ticket or transaction.' }])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [sceneRun, setSceneRun] = useState(0)
+  const [scenePlaying, setScenePlaying] = useState(false)
+  const sceneTimer = useRef<number | null>(null)
+
+  useEffect(() => () => {
+    if (sceneTimer.current !== null) window.clearTimeout(sceneTimer.current)
+  }, [])
 
   useEffect(() => {
     if (!selectedTicket) return
@@ -212,6 +222,10 @@ function AgentPanel({ tickets, selectedTicket, onOpenTicket, onClose }: { ticket
     setInput('')
     setMessages((current) => [...current, { id: `user-${Date.now()}`, role: 'user', text }])
     setSending(true)
+    setSceneRun((current) => current + 1)
+    setScenePlaying(true)
+    if (sceneTimer.current !== null) window.clearTimeout(sceneTimer.current)
+    sceneTimer.current = window.setTimeout(() => setScenePlaying(false), PAYPILOT_SCENE_DURATION_MS)
     const match = tickets.find((ticket) => text.toLowerCase().includes(ticketId(ticket).toLowerCase()) || text.toLowerCase().includes(transactionId(ticket).toLowerCase()))
     let responseTicket = match
     let resolvedText = ''
@@ -233,7 +247,7 @@ function AgentPanel({ tickets, selectedTicket, onOpenTicket, onClose }: { ticket
     setSending(false)
   }
 
-  return <section className="agent-panel"><header className="agent-header"><div className="agent-title"><span className="agent-mark"><Sparkles size={16} /></span><div><h2>PayPilot Agent</h2><span className="agent-online"><span /> Online</span></div></div><div className="agent-header-actions"><button type="button" className="panel-icon-button" title="Clear conversation" aria-label="Clear conversation" onClick={() => setMessages([{ id: 'welcome', role: 'agent', text: 'I trace gateway, bank and ledger records before answering. Ask me about a ticket or transaction.' }])}><RefreshCw size={15} /></button><button type="button" className="panel-icon-button" title="Close PayPilot Agent" aria-label="Close PayPilot Agent" onClick={onClose}><X size={15} /></button></div><p>Ask about a ticket or transaction.</p></header><div className="agent-conversation">{messages.map((message) => <div className={`agent-message agent-message-${message.role}`} key={message.id}><span className="message-label">{message.role === 'user' ? 'You' : 'PayPilot'}</span><p>{message.text}</p>{message.evidence && <div className="message-evidence"><EvidenceRows items={message.evidence} /><span className="evidence-counts">{evidenceCounts(message.evidence)}</span></div>}</div>)}{sending && <div className="agent-message agent-message-agent"><span className="message-label">PayPilot</span><p className="agent-typing"><span /><span /><span /></p></div>}</div><form className="agent-composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask PayPilot about a transaction..." rows={2} /><button type="submit" aria-label="Send message" title="Send message" disabled={sending || !input.trim()}><Send size={16} /></button></form></section>
+  return <section className="agent-panel"><header className="agent-header"><div className="agent-title"><span className="agent-mark"><Sparkles size={16} /></span><div><h2>PayPilot Agent</h2><span className="agent-online"><span /> Online</span></div></div><div className="agent-header-actions"><button type="button" className="panel-icon-button" title="Clear conversation" aria-label="Clear conversation" onClick={() => setMessages([{ id: 'welcome', role: 'agent', text: 'I trace gateway, bank and ledger records before answering. Ask me about a ticket or transaction.' }])}><RefreshCw size={15} /></button><button type="button" className="panel-icon-button" title="Close PayPilot Agent" aria-label="Close PayPilot Agent" onClick={onClose}><X size={15} /></button></div><p>Ask about a ticket or transaction.</p></header><div className="agent-conversation">{messages.map((message) => <div className={`agent-message agent-message-${message.role}`} key={message.id}><span className="message-label">{message.role === 'user' ? 'You' : 'PayPilot'}</span><p>{message.text}</p>{message.evidence && <div className="message-evidence"><EvidenceRows items={message.evidence} /><span className="evidence-counts">{evidenceCounts(message.evidence)}</span></div>}</div>)}{sending && <div className="agent-message agent-message-agent"><span className="message-label">PayPilot</span><p className="agent-typing"><span /><span /><span /></p></div>}</div>{scenePlaying && <div className="agent-spline-stage" aria-label="PayPilot is investigating" role="status"><Spline key={sceneRun} scene={PAYPILOT_SCENE} /><span className="agent-spline-label">PayPilot is tracing the evidence</span></div>}<form className="agent-composer" onSubmit={(event) => { event.preventDefault(); void sendMessage() }}><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask PayPilot about a transaction..." rows={2} /><button type="submit" aria-label="Send message" title="Send message" disabled={sending || !input.trim()}><Send size={16} /></button></form></section>
 }
 
 function AgentHeroButton({ onClick }: { onClick: () => void }): ReactElement {

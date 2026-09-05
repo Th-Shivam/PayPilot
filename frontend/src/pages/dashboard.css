@@ -864,9 +864,56 @@
 }
 
 .agent-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   background: #1b1b1b;
+}
+
+.agent-spline-stage {
+  position: absolute;
+  inset: 75px 0 74px;
+  z-index: 4;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #1b1b1b;
+  animation: agent-spline-in 220ms ease both;
+}
+
+.agent-spline-stage > div,
+.agent-spline-stage canvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+
+.agent-spline-stage canvas {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.agent-spline-label {
+  position: absolute;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  padding: 7px 10px;
+  border: 1px solid #3f3f3f;
+  border-radius: 3px;
+  background: rgba(20, 20, 20, 0.88);
+  color: #bcbcbc;
+  font: 10px var(--font-mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+@keyframes agent-spline-in {
+  from { opacity: 0; transform: scale(0.985); }
+  to { opacity: 1; transform: scale(1); }
 }
 
 .workspace-title-row {
